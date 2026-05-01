@@ -32,19 +32,21 @@ class NorthFlowCollector(BaseCollector):
     def _ensure_table(self):
         """确保 north_flow 表存在"""
         conn = self.db._connect()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS north_flow (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trade_date DATE,
-                sh_net REAL,
-                sz_net REAL,
-                total_net REAL,
-                cumulative_net REAL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS north_flow (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_date DATE,
+                    sh_net REAL,
+                    sz_net REAL,
+                    total_net REAL,
+                    cumulative_net REAL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+        finally:
+            self.db._close(conn)
 
     def _parse_kline_value(self, val_str: str) -> float:
         """解析K线数值，处理各种格式"""
@@ -90,47 +92,43 @@ class NorthFlowCollector(BaseCollector):
                 return results
 
             count = 0
-            for line in klines:
-                try:
-                    items = line.split(",")
-                    if len(items) < 5:
+            conn = self.db._connect()
+            try:
+                for line in klines:
+                    try:
+                        items = line.split(",")
+                        if len(items) < 5:
+                            continue
+
+                        trade_date_str = items[0].strip()
+                        if "-" not in trade_date_str and len(trade_date_str) == 8:
+                            trade_date = f"{trade_date_str[:4]}-{trade_date_str[4:6]}-{trade_date_str[6:8]}"
+                        else:
+                            trade_date = trade_date_str
+
+                        sh_net = self._parse_kline_value(items[1])
+                        sz_net = self._parse_kline_value(items[2])
+                        total_net = self._parse_kline_value(items[3])
+                        cumulative_net = self._parse_kline_value(items[4])
+
+                        existing = conn.execute(
+                            "SELECT id FROM north_flow WHERE trade_date = ?",
+                            (trade_date,)
+                        ).fetchone()
+
+                        if not existing:
+                            conn.execute("""
+                                INSERT INTO north_flow(trade_date, sh_net, sz_net, total_net, cumulative_net)
+                                VALUES(?, ?, ?, ?, ?)
+                            """, (trade_date, sh_net, sz_net, total_net, cumulative_net))
+                            count += 1
+
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"[北向资金] K线解析异常: {line[:50]}... {e}")
                         continue
-
-                    trade_date_str = items[0].strip()
-                    # 格式: "2026-04-30" 或 "20260430"
-                    if "-" not in trade_date_str and len(trade_date_str) == 8:
-                        trade_date = f"{trade_date_str[:4]}-{trade_date_str[4:6]}-{trade_date_str[6:8]}"
-                    else:
-                        trade_date = trade_date_str
-
-                    # 沪股通净流入 (亿)
-                    sh_net = self._parse_kline_value(items[1])
-                    # 深股通净流入 (亿)
-                    sz_net = self._parse_kline_value(items[2])
-                    # 合计净流入 (亿)
-                    total_net = self._parse_kline_value(items[3])
-                    # 累计净流入
-                    cumulative_net = self._parse_kline_value(items[4])
-
-                    conn = self.db._connect()
-                    # 去重：同一天不重复插入
-                    existing = conn.execute(
-                        "SELECT id FROM north_flow WHERE trade_date = ?",
-                        (trade_date,)
-                    ).fetchone()
-
-                    if not existing:
-                        conn.execute("""
-                            INSERT INTO north_flow(trade_date, sh_net, sz_net, total_net, cumulative_net)
-                            VALUES(?, ?, ?, ?, ?)
-                        """, (trade_date, sh_net, sz_net, total_net, cumulative_net))
-                        conn.commit()
-                        count += 1
-                    conn.close()
-
-                except (ValueError, IndexError) as e:
-                    logger.warning(f"[北向资金] K线解析异常: {line[:50]}... {e}")
-                    continue
+                conn.commit()
+            finally:
+                self.db._close(conn)
 
             results["north_flow"] = count
             logger.info(f"[北向资金] 采集完成，新增 {count} 条")

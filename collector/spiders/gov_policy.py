@@ -77,8 +77,13 @@ class GovPolicyCollector(BaseCollector):
                         if not title or not href:
                             continue
 
-                        full_url = href if href.startswith("http") else f"http://www.pbc.gov.cn/{href}"
-                        full_url = full_url.replace("//", "/").replace("http:/", "http://")
+                        # 安全拼接URL
+                        if href.startswith("http"):
+                            full_url = href
+                        elif href.startswith("/"):
+                            full_url = f"http://www.pbc.gov.cn{href}"
+                        else:
+                            full_url = f"http://www.pbc.gov.cn/{href}"
 
                         # 提取发布时间
                         date_str = ""

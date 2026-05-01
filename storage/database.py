@@ -1378,6 +1378,51 @@ class Database:
             logger.error(f"插入日K线失败 ({stock_code} {trade_date}): {e}")
             return False
 
+    def batch_upsert_daily_prices(self, stock_code: str,
+                                    rows: List[Dict]) -> int:
+        """
+        批量插入日K线数据（单连接单事务）
+
+        Args:
+            stock_code: 股票代码
+            rows: [{trade_date, open_price, close_price, high_price, low_price, volume, amount, change_pct}]
+
+        Returns:
+            成功插入/更新的数量
+        """
+        if not rows:
+            return 0
+        count = 0
+        try:
+            conn = self._connect()
+            for r in rows:
+                try:
+                    conn.execute("""
+                        INSERT INTO daily_prices(
+                            stock_code, trade_date, open_price, close_price,
+                            high_price, low_price, volume, amount, change_pct
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(stock_code, trade_date) DO UPDATE SET
+                            open_price=excluded.open_price,
+                            close_price=excluded.close_price,
+                            high_price=excluded.high_price,
+                            low_price=excluded.low_price,
+                            volume=excluded.volume,
+                            amount=excluded.amount,
+                            change_pct=excluded.change_pct
+                    """, (stock_code, r["trade_date"], r.get("open_price"),
+                           r.get("close_price"), r.get("high_price"),
+                           r.get("low_price"), r.get("volume"),
+                           r.get("amount"), r.get("change_pct")))
+                    count += 1
+                except Exception:
+                    pass
+            conn.commit()
+            self._close(conn)
+        except Exception as e:
+            logger.error(f"批量插入日K线失败 ({stock_code}): {e}")
+        return count
+
     def get_price_history(self, code: str, days: int = 60) -> List[Dict]:
         """
         获取历史K线数据（用于技术指标和图表）
