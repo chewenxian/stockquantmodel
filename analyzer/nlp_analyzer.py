@@ -282,6 +282,12 @@ class NLPAnalyzer:
                 "opportunities": []
             }
 
+        # 检查新闻是否包含有效的标题/内容
+        valid_news = [n for n in news_list if n.get("title") or n.get("content")]
+        if not valid_news:
+            logger.warning("新闻列表中的条目均无有效标题/内容")
+            news_list = []
+
         # 构建新闻文本（取标题+摘要，控制token用量）
         news_texts = []
         for i, news in enumerate(news_list):

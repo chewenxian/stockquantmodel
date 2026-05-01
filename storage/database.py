@@ -402,6 +402,14 @@ class Database:
              "SELECT content_hash FROM announcements LIMIT 1"),
             ("ALTER TABLE announcements ADD COLUMN category TEXT DEFAULT '其他'",
              "SELECT category FROM announcements LIMIT 1"),
+
+            # news 表 - 可信度字段（v7.0 新增）
+            ("ALTER TABLE news ADD COLUMN credibility_tag TEXT DEFAULT ''",
+             "SELECT credibility_tag FROM news LIMIT 1"),
+            ("ALTER TABLE news ADD COLUMN verified BOOLEAN DEFAULT 0",
+             "SELECT verified FROM news LIMIT 1"),
+            ("ALTER TABLE news ADD COLUMN evidence TEXT",
+             "SELECT evidence FROM news LIMIT 1"),
         ]
 
         for alter_sql, check_sql in migrations:

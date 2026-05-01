@@ -16,6 +16,8 @@
     python main.py api           # 启动 FastAPI 服务
     python main.py notify        # 触发推送（晚报+信号）
     python main.py history       # 拉取所有自选股历史K线
+    python main.py verify        # 交叉验证最近N条新闻（默认50条）
+    python main.py verify 100    # 验证最近100条新闻
 """
 import sys
 import os
@@ -252,6 +254,113 @@ def cmd_notify():
     print("✅ 推送完成")
 
 
+def cmd_verify():
+    """
+    交叉验证新闻可信度
+
+    用法:
+        python main.py verify         # 验证最近 50 条新闻
+        python main.py verify 100     # 验证最近 100 条新闻
+        python main.py verify 100 --save  # 验证并保存结果到数据库
+    """
+    from analyzer.cross_validate import CrossValidator
+    from storage.database import Database
+
+    limit = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 50
+    save_to_db = "--save" in sys.argv
+
+    db = Database("data/stock_news.db")
+    validator = CrossValidator(db=db)
+
+    print(f"🔍 开始交叉验证最近 {limit} 条新闻...")
+
+    # 获取最新新闻
+    conn = db._connect()
+    try:
+        rows = conn.execute("""
+            SELECT id, title, source, summary, content, published_at
+            FROM news
+            ORDER BY published_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+    except Exception:
+        rows = []
+    db._close(conn)
+
+    if not rows:
+        print("❌ 数据库中没有新闻数据")
+        return
+
+    print(f"📊 共 {len(rows)} 条新闻")
+
+    # 可信度统计
+    results_counter = {
+        "✅ 确认": 0,
+        "⚠️ 已核实": 0,
+        "📋 待核实": 0,
+        "❓ 传闻": 0,
+        "🚫 存疑": 0,
+    }
+
+    verified_count = 0
+    rumor_count = 0
+    evidence_total = 0
+
+    for row in rows:
+        news_item = dict(row)
+        result = validator.verify_news(news_item)
+
+        tag = result["tag"]
+        verified = result["verified"]
+        confidence = result["confidence"]
+        evidence_count = len(result["evidence"])
+
+        # 统计
+        if tag in results_counter:
+            results_counter[tag] += 1
+        if verified:
+            verified_count += 1
+        if tag == "❓ 传闻" or tag == "🚫 存疑":
+            rumor_count += 1
+        evidence_total += evidence_count
+
+        # 保存到数据库
+        if save_to_db:
+            validator.save_verification(news_item["id"], result)
+
+        # 输出
+        emoji = tag.split()[0] if tag else "❓"
+        title_short = news_item["title"][:40].ljust(40)
+        source = news_item.get("source", "?")[:10].ljust(10)
+        print(f"  {emoji} {title_short} [{source}] 置信度={confidence:.2f} 证据={evidence_count}条")
+
+    # 总结
+    print(f"\n{'=' * 60}")
+    print(f"📊 交叉验证总结（共 {len(rows)} 条）：")
+    for tag, count in results_counter.items():
+        pct = count / max(len(rows), 1) * 100
+        print(f"  {tag}: {count} 条 ({pct:.1f}%)")
+
+    print(f"\n  ✅ 已验证: {verified_count}/{len(rows)} ({verified_count/max(len(rows),1)*100:.1f}%)")
+    print(f"  ❌ 传闻/存疑: {rumor_count}/{len(rows)}")
+    print(f"  📄 总证据引用: {evidence_total} 条")
+
+    # 未验证传闻告警
+    pending = results_counter.get("❓ 传闻", 0) + results_counter.get("🚫 存疑", 0)
+    if pending > 0:
+        print(f"\n⚠️ 发现 {pending} 条未经验证的传闻，建议关注")
+        alerts = validator.get_unverified_alerts(days=3)
+        if alerts:
+            print(f"\n📋 近期未验证传闻 ({len(alerts)} 条)：")
+            for a in alerts[:5]:
+                print(f"  🔶 [{a['source']}] {a['title'][:50]}")
+
+    if save_to_db:
+        print(f"\n💾 验证结果已保存到数据库")
+    else:
+        print(f"\n💡 添加 --save 参数可将验证结果写入数据库")
+
+
 def cmd_history():
     """拉取所有自选股历史K线数据"""
     from collector.spiders.history_quotes import HistoryQuotesCollector
@@ -340,6 +449,7 @@ if __name__ == "__main__":
         "api": cmd_api,
         "notify": cmd_notify,
         "history": cmd_history,
+        "verify": cmd_verify,
     }
 
     if command in commands:

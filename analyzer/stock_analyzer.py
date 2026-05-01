@@ -10,6 +10,11 @@
 5. 调用影响评估模型
 6. 调用建议生成器生成增强建议（含推理链）
 7. 结果写入分析表
+
+v7.0 新增:
+- 跨源情报交叉验证: 调用 cross_validate.verify_news()
+- 分析报告中增加 "信息可信度" 字段
+- 对低可信度的新闻降低其情绪权重
 """
 import logging
 import json
@@ -83,6 +88,22 @@ class StockAnalyzer:
                                                impact_model=self.impact_model)
             except Exception as e:
                 logger.warning(f"初始化建议生成器失败: {e}")
+
+        # 交叉验证引擎（v7.0）
+        self.cross_validator = None
+
+    def _init_cross_validator(self):
+        """延迟初始化交叉验证器（v7.0）"""
+        if self.cross_validator is not None:
+            return self.cross_validator
+        try:
+            from analyzer.cross_validate import CrossValidator
+            self.cross_validator = CrossValidator(db=self.db)
+            logger.info("交叉验证引擎已初始化")
+        except Exception as e:
+            logger.warning(f"初始化交叉验证引擎失败: {e}")
+            self.cross_validator = None
+        return self.cross_validator
 
     def _load_config(self) -> dict:
         import yaml
@@ -294,7 +315,48 @@ class StockAnalyzer:
             except Exception as e:
                 logger.warning(f"{code}: 知识图谱推理异常: {e}")
 
-        # 5. 情绪分析
+        # 5. 交叉验证新闻可信度（v7.0）
+        credibility_info = {
+            "verified_news_count": 0,
+            "credibility_tags": {},
+            "confidence_weight": 1.0,
+        }
+        validator = self._init_cross_validator()
+        if validator and news_items:
+            try:
+                for n in news_items:
+                    if n.get("credibility_tag"):
+                        tag = n["credibility_tag"]
+                        verified = n.get("verified", 0)
+                    else:
+                        verify_result = validator.verify_news(n)
+                        tag = verify_result["tag"]
+                        verified = 1 if verify_result["verified"] else 0
+                        if n.get("id") and isinstance(n["id"], int):
+                            try:
+                                validator.save_verification(n["id"], verify_result)
+                            except Exception:
+                                pass
+
+                    credibility_info["credibility_tags"][str(n.get("id", "?"))] = {
+                        "tag": tag,
+                        "verified": verified,
+                        "confidence": n.get("cross_verify", {}).get("confidence", 0.0),
+                    }
+                    if verified:
+                        credibility_info["verified_news_count"] += 1
+
+                total = len(news_items)
+                verified_ratio = credibility_info["verified_news_count"] / max(total, 1)
+                credibility_info["confidence_weight"] = round(0.5 + 0.5 * verified_ratio, 4)
+
+                logger.info(f"{code}: 交叉验证完成 - "
+                            f"已验证 {credibility_info['verified_news_count']}/{total}, "
+                            f"权重={credibility_info['confidence_weight']}")
+            except Exception as e:
+                logger.warning(f"{code}: 交叉验证异常: {e}")
+
+        # 6. 情绪分析（受可信度权重修正）
         avg_sentiment = 0.0
         sentiment_std = 0.0
         summary = "无相关新闻"
@@ -305,10 +367,11 @@ class StockAnalyzer:
         if news_items:
             if self.sentiment:
                 try:
-                    avg_sentiment = self.sentiment.calculate_sentiment_score(news_items)
+                    raw_sentiment = self.sentiment.calculate_sentiment_score(news_items)
+                    credibility_weight = credibility_info.get("confidence_weight", 1.0)
+                    avg_sentiment = raw_sentiment * credibility_weight
                     anomaly = self.sentiment.detect_anomaly(news_items)
 
-                    # 标准差
                     sentiments = [
                         self.sentiment.analyze_text_sentiment(
                             n.get("title", ""), n.get("summary", "")
@@ -318,6 +381,8 @@ class StockAnalyzer:
                         mean_val = sum(sentiments) / len(sentiments)
                         variance = sum((s - mean_val) ** 2 for s in sentiments) / len(sentiments)
                         sentiment_std = round(variance ** 0.5, 4)
+
+                    logger.info(f"{code}: 情绪={raw_sentiment:.2f} × 可信度权重={credibility_weight} = {avg_sentiment:.2f}")
                 except Exception as e:
                     logger.warning(f"{code}: 规则情绪分析异常: {e}")
 
@@ -328,7 +393,7 @@ class StockAnalyzer:
                     key_topics = llm_result.get("key_topics", [])
                     risk_warnings = llm_result.get("risk_warnings", [])
                     if "avg_sentiment" in llm_result:
-                        avg_sentiment = llm_result["avg_sentiment"]
+                        avg_sentiment = llm_result["avg_sentiment"] * credibility_info.get("confidence_weight", 1.0)
                 except Exception as e:
                     logger.warning(f"{code}: NLP分析异常: {e}")
 
@@ -341,7 +406,7 @@ class StockAnalyzer:
             avg_sentiment = min(avg_sentiment, -0.4)
             logger.info(f"{code}: 知识图谱修正情绪为负面 (原:{avg_sentiment:.2f})")
 
-        # 6. 影响评估
+        # 7. 影响评估
         impact_evaluation: Dict = {}
         if self.impact_model:
             try:
@@ -358,7 +423,7 @@ class StockAnalyzer:
             except Exception as e:
                 logger.warning(f"{code}: 影响评估异常: {e}")
 
-        # 7. 增强建议生成
+        # 8. 增强建议生成（含可信度信息）
         analysis_data = {
             "code": code,
             "name": name,
@@ -370,6 +435,7 @@ class StockAnalyzer:
             "market_data": full_market,
             "impact_evaluation": impact_evaluation,
             "kg_reasoning": kg_result,
+            "credibility": credibility_info,
         }
 
         advice: Dict = {}
@@ -386,7 +452,16 @@ class StockAnalyzer:
                     "key_factors": [],
                 }
 
-        # 8. 构建增强格式的结果
+        # 9. 构建增强格式的结果（含可信度）
+        info_credibility = {
+            "verified_news_count": credibility_info["verified_news_count"],
+            "total_news": len(news_items),
+            "verified_ratio": round(
+                credibility_info["verified_news_count"] / max(len(news_items), 1), 4
+            ),
+            "confidence_weight": credibility_info["confidence_weight"],
+        }
+
         result = {
             "code": code,
             "name": name,
@@ -413,13 +488,17 @@ class StockAnalyzer:
             "risk_level": advice.get("risk_level", "中"),
             "impact_level": impact_evaluation.get("level", "中性"),
             "impact_score": impact_evaluation.get("impact_score", 0.0),
+            # 可信度字段（v7.0）
+            "credibility": credibility_info,
+            "info_credibility": info_credibility,
         }
 
-        # 9. 写入数据库
+        # 10. 写入数据库
         self._save_analysis(result)
 
         logger.info(f"{code}: 增强分析完成: "
                     f"情绪={avg_sentiment:.2f}, "
+                    f"可信度={info_credibility['verified_ratio']:.0%}, "
                     f"推理链={len(result['reasoning_chain'])}步, "
                     f"建议={result['suggestion']}")
         return result
