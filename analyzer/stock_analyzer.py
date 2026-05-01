@@ -1,43 +1,48 @@
 """
-个股分析入口模块
+个股分析入口模块（增强版）
 对单只或多只股票进行完整分析
 
 流程：
 1. 从数据库读取新闻、公告、行情、资金数据
-2. 调用 NLP 分析器做情绪分析
-3. 调用建议生成器生成建议
-4. 结果写入分析表
+2. 调用 NER 提取金融实体
+3. 调用知识图谱推理间接影响
+4. 调用 NLP 分析器做情绪分析
+5. 调用影响评估模型
+6. 调用建议生成器生成增强建议（含推理链）
+7. 结果写入分析表
 """
 import logging
 import json
 from datetime import datetime, date
-from typing import Dict, List, Optional
-
-import yaml
+from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
 
 class StockAnalyzer:
     """
-    个股分析入口
-    整合 NLP 分析、情绪分析、建议生成的完整流程
+    个股分析入口（增强版）
+    整合 NER、知识图谱、影响评估、NLP、建议生成的完整流程
     """
 
     def __init__(self, db=None, nlp_analyzer=None, sentiment_analyzer=None,
-                 trading_advisor=None):
+                 trading_advisor=None, knowledge_graph=None, impact_model=None):
         self.db = db
         self.nlp = nlp_analyzer
         self.sentiment = sentiment_analyzer
         self.advisor = trading_advisor
+        self.kg = knowledge_graph
+        self.impact_model = impact_model
         self._init_components()
 
     def _init_components(self):
         """延迟初始化各组件"""
+        import yaml
+        config = self._load_config()
+
         if self.db is None:
             try:
                 from storage.database import Database
-                config = self._load_config()
                 db_path = config.get("system", {}).get("db_path", "data/stock_news.db")
                 self.db = Database(db_path)
             except Exception as e:
@@ -57,14 +62,30 @@ class StockAnalyzer:
             except Exception as e:
                 logger.warning(f"初始化情绪分析器失败: {e}")
 
+        if self.kg is None:
+            try:
+                from analyzer.knowledge_graph import FinancialKnowledgeGraph
+                self.kg = FinancialKnowledgeGraph()
+            except Exception as e:
+                logger.warning(f"初始化知识图谱失败: {e}")
+
+        if self.impact_model is None:
+            try:
+                from analyzer.impact_model import ImpactModel
+                self.impact_model = ImpactModel(db=self.db)
+            except Exception as e:
+                logger.warning(f"初始化影响评估模型失败: {e}")
+
         if self.advisor is None:
             try:
                 from analyzer.advisor import TradingAdvisor
-                self.advisor = TradingAdvisor()
+                self.advisor = TradingAdvisor(knowledge_graph=self.kg,
+                                               impact_model=self.impact_model)
             except Exception as e:
                 logger.warning(f"初始化建议生成器失败: {e}")
 
     def _load_config(self) -> dict:
+        import yaml
         try:
             with open("config.yaml", "r", encoding="utf-8") as f:
                 return yaml.safe_load(f)
@@ -76,7 +97,7 @@ class StockAnalyzer:
     # ──────────────────────────────────────────
 
     def _get_news_for_stock(self, code: str, days: int = 1) -> List[Dict]:
-        """获取某只股票的近期新闻，支持news_stocks关联和关键词搜索两种方式"""
+        """获取某只股票的近期新闻"""
         if not self.db:
             return []
         try:
@@ -86,7 +107,7 @@ class StockAnalyzer:
         except Exception as e:
             logger.warning(f"读取 {code} 新闻关联失败: {e}")
 
-        # Fallback: 按股票名称关键词搜索新闻
+        # Fallback: 按股票名称关键词搜索
         try:
             conn = self.db._connect()
             name_row = conn.execute(
@@ -105,8 +126,8 @@ class StockAnalyzer:
                     logger.info(f"{code}: 关键词[{keyword}]搜索到 {len(rows)} 条新闻")
                     return [dict(r) for r in rows]
             conn.close()
-        except Exception as e2:
-            logger.warning(f"{code}: 关键词搜索异常: {e2}")
+        except Exception:
+            pass
         return []
 
     def _get_market_data(self, code: str) -> Optional[Dict]:
@@ -165,39 +186,46 @@ class StockAnalyzer:
             return None
 
     # ──────────────────────────────────────────
-    # 核心分析
+    # 核心分析（增强版）
     # ──────────────────────────────────────────
 
     def analyze_stock(self, code: str, days: int = 1) -> Dict:
         """
-        对单只股票进行完整分析
+        对单只股票进行完整分析（增强版）
+
+        流程：
+        1. 获取股票信息、新闻、行情、资金数据
+        2. NER 实体提取（公司名/产品/行业）
+        3. 知识图谱推理间接影响
+        4. 情绪分析（规则+LLM）
+        5. 影响评估模型计算影响因子
+        6. 增强建议生成（含推理链）
 
         Args:
             code: 股票代码
             days: 分析近几天的数据
 
-        Returns:
+        Returns (增强格式):
             {
-                "code": "600519",
-                "name": "贵州茅台",
-                "avg_sentiment": 0.45,
-                "sentiment_std": 0.12,
-                "news_count": 10,
-                "summary": "...",
-                "key_topics": [...],
-                "risk_warnings": [...],
-                "anomaly": {...},
-                "market_data": {...},
-                "suggestion": "买入",
-                "confidence": 0.75,
-                "risk_level": "低",
-                "reason": "..."
+                "code": "300750",
+                "name": "宁德时代",
+                "avg_sentiment": 0.72,
+                ...
+                "ner_entities": {提取出的金融实体},
+                "kg_reasoning": {知识图谱推理结果},
+                "impact_evaluation": {影响评估结果},
+                "suggestion": "强烈关注",
+                "confidence": 0.85,
+                "reasoning": ["推理1", "推理2", ...],
+                "key_factors": ["关键因子1", "关键因子2"],
+                ...
             }
         """
-        logger.info(f"开始分析 {code} (近{days}天)")
+        logger.info(f"开始增强分析 {code} (近{days}天)")
 
-        # 1. 获取股票信息
+        # 1. 获取基础信息
         stock_info = self._get_stock_info(code) or {"code": code, "name": code, "market": ""}
+        name = stock_info.get("name", code)
 
         # 2. 获取相关数据
         news_items = self._get_news_for_stock(code, days=days)
@@ -205,68 +233,138 @@ class StockAnalyzer:
         money_flow = self._get_money_flow(code)
 
         # 合并行情和资金数据
-        full_market = {}
+        full_market: Dict = {}
         if market_data:
             full_market.update(market_data)
         if money_flow:
             full_market.update(money_flow)
 
-        logger.info(f"{code}: 获取到 {len(news_items)} 条新闻, 行情数据: {'有' if market_data else '无'}")
+        logger.info(f"{code}: {len(news_items)} 条新闻, 行情: {'有' if market_data else '无'}")
 
-        # 3. 情绪分析
+        # 3. NER 实体提取
+        ner_entities: Dict = {}
+        news_context = ""
+        try:
+            from analyzer.ner_extractor import extract_financial_entities
+            # 拼接新闻上下文用于NER
+            news_context = " ".join([
+                n.get("title", "") for n in news_items[:10]
+            ])
+            if news_context:
+                ner_entities = extract_financial_entities(news_context)
+                logger.info(f"{code}: NER提取到 {len(ner_entities.get('sectors', []))} 个行业, "
+                           f"{len(ner_entities.get('products', []))} 个产品, "
+                           f"{len(ner_entities.get('stock_mentions', []))} 只相关股票")
+        except Exception as e:
+            logger.warning(f"{code}: NER提取异常: {e}")
+
+        # 4. 知识图谱推理
+        kg_result: Dict = {}
+        if self.kg and news_context:
+            try:
+                kg_result = self.kg.infer_impact(code, news_context)
+                logger.info(f"{code}: 知识图谱推理: {kg_result.get('direct_impact', 'N/A')}, "
+                           f"{len(kg_result.get('chain_reactions', []))} 条连锁反应")
+            except Exception as e:
+                logger.warning(f"{code}: 知识图谱推理异常: {e}")
+
+        # 5. 情绪分析
         avg_sentiment = 0.0
         sentiment_std = 0.0
         summary = "无相关新闻"
-        key_topics = []
-        risk_warnings = []
-        anomaly = {"is_anomaly": False, "type": "none", "severity": "low"}
+        key_topics: List[str] = []
+        risk_warnings: List[str] = []
+        anomaly: Dict = {"is_anomaly": False, "type": "none", "severity": "low"}
 
         if news_items:
-            # 规则情绪分析
             if self.sentiment:
-                avg_sentiment = self.sentiment.calculate_sentiment_score(news_items)
-                anomaly = self.sentiment.detect_anomaly(news_items)
+                try:
+                    avg_sentiment = self.sentiment.calculate_sentiment_score(news_items)
+                    anomaly = self.sentiment.detect_anomaly(news_items)
 
-                # 计算情绪标准差
-                sentiments = [self.sentiment.analyze_text_sentiment(
-                    n.get("title", ""), n.get("summary", ""))
-                    for n in news_items]
-                if sentiments:
-                    mean = sum(sentiments) / len(sentiments)
-                    variance = sum((s - mean) ** 2 for s in sentiments) / len(sentiments)
-                    sentiment_std = round(variance ** 0.5, 4)
+                    # 标准差
+                    sentiments = [
+                        self.sentiment.analyze_text_sentiment(
+                            n.get("title", ""), n.get("summary", "")
+                        ) for n in news_items
+                    ]
+                    if sentiments:
+                        mean_val = sum(sentiments) / len(sentiments)
+                        variance = sum((s - mean_val) ** 2 for s in sentiments) / len(sentiments)
+                        sentiment_std = round(variance ** 0.5, 4)
+                except Exception as e:
+                    logger.warning(f"{code}: 规则情绪分析异常: {e}")
 
-            # LLM 分析
             if self.nlp:
-                llm_result = self.nlp.analyze_news(news_items)
-                summary = llm_result.get("summary", summary)
-                key_topics = llm_result.get("key_topics", [])
-                risk_warnings = llm_result.get("risk_warnings", [])
-                # 优先使用 LLM 的情绪评分
-                if "avg_sentiment" in llm_result:
-                    avg_sentiment = llm_result["avg_sentiment"]
+                try:
+                    llm_result = self.nlp.analyze_news(news_items)
+                    summary = llm_result.get("summary", summary)
+                    key_topics = llm_result.get("key_topics", [])
+                    risk_warnings = llm_result.get("risk_warnings", [])
+                    if "avg_sentiment" in llm_result:
+                        avg_sentiment = llm_result["avg_sentiment"]
+                except Exception as e:
+                    logger.warning(f"{code}: NLP分析异常: {e}")
 
-        # 4. 生成交易建议
+        # 如果知识图谱推理了直接冲击，影响情绪
+        kg_direct = kg_result.get("direct_impact", "")
+        if kg_direct in ("重大利好", "利好") and avg_sentiment < 0.4:
+            avg_sentiment = max(avg_sentiment, 0.4)
+            logger.info(f"{code}: 知识图谱修正情绪为正面 (原:{avg_sentiment:.2f})")
+        elif kg_direct in ("重大利空", "利空") and avg_sentiment > -0.4:
+            avg_sentiment = min(avg_sentiment, -0.4)
+            logger.info(f"{code}: 知识图谱修正情绪为负面 (原:{avg_sentiment:.2f})")
+
+        # 6. 影响评估
+        impact_evaluation: Dict = {}
+        if self.impact_model:
+            try:
+                impact_evaluation = self.impact_model.calculate_impact_factor(
+                    stock_code=code,
+                    sentiment=avg_sentiment,
+                    news_count=len(news_items),
+                    market_data=full_market,
+                    anomaly_data=anomaly,
+                    knowledge_graph_impact=kg_result,
+                )
+                logger.info(f"{code}: 影响评估得分: {impact_evaluation.get('impact_score', 0):.2f}, "
+                           f"等级: {impact_evaluation.get('level', 'N/A')}")
+            except Exception as e:
+                logger.warning(f"{code}: 影响评估异常: {e}")
+
+        # 7. 增强建议生成
         analysis_data = {
             "code": code,
-            "name": stock_info.get("name", code),
+            "name": name,
             "avg_sentiment": avg_sentiment,
             "news_count": len(news_items),
             "key_topics": key_topics,
             "risk_warnings": risk_warnings,
             "anomaly": anomaly,
             "market_data": full_market,
+            "impact_evaluation": impact_evaluation,
+            "kg_reasoning": kg_result,
         }
 
-        advice = {}
+        advice: Dict = {}
         if self.advisor:
-            advice = self.advisor.generate_advice(analysis_data)
+            try:
+                advice = self.advisor.generate_advice(analysis_data)
+            except Exception as e:
+                logger.warning(f"{code}: 建议生成异常: {e}")
+                advice = {
+                    "suggestion": "持有",
+                    "confidence": 0.3,
+                    "reasoning": [f"生成失败: {e}"],
+                    "risk_level": "中",
+                    "key_factors": [],
+                }
 
-        # 5. 组装结果
+        # 8. 构建增强格式的结果
         result = {
             "code": code,
-            "name": stock_info.get("name", code),
-            "avg_sentiment": avg_sentiment,
+            "name": name,
+            "avg_sentiment": round(avg_sentiment, 4),
             "sentiment_std": sentiment_std,
             "news_count": len(news_items),
             "summary": summary,
@@ -274,35 +372,60 @@ class StockAnalyzer:
             "risk_warnings": risk_warnings[:3],
             "anomaly": anomaly,
             "market_data": full_market,
-            # 建议字段
+            # 增强分析字段
+            "ner_entities": ner_entities,
+            "kg_reasoning": kg_result,
+            "impact_evaluation": impact_evaluation,
+            "related_stocks": kg_result.get("related_stocks", []),
+            "chain_reactions": kg_result.get("chain_reactions", []),
+            # 增强建议字段
             "suggestion": advice.get("suggestion", "持有"),
-            "suggestion_reason": advice.get("reason", ""),
+            "suggestion_reason": "; ".join(advice.get("reasoning", [])),
+            "reasoning_chain": advice.get("reasoning", []),
+            "key_factors": advice.get("key_factors", []),
             "confidence": advice.get("confidence", 0.0),
             "risk_level": advice.get("risk_level", "中"),
+            "impact_level": impact_evaluation.get("level", "中性"),
+            "impact_score": impact_evaluation.get("impact_score", 0.0),
         }
 
-        # 6. 写入数据库
+        # 9. 写入数据库
         self._save_analysis(result)
 
-        logger.info(f"{code} 分析完成: 情绪={avg_sentiment:.2f}, 建议={result['suggestion']}")
+        logger.info(f"{code}: 增强分析完成: "
+                    f"情绪={avg_sentiment:.2f}, "
+                    f"推理链={len(result['reasoning_chain'])}步, "
+                    f"建议={result['suggestion']}")
         return result
 
     def _save_analysis(self, result: Dict):
-        """将分析结果写入数据库"""
+        """将增强分析结果写入数据库（新增 reasoning_chain 等字段）"""
         if not self.db:
             return
         try:
             today = date.today().isoformat()
             conn = self.db._connect()
 
-            # 检查是否已有今日分析
             existing = conn.execute(
                 "SELECT id FROM analysis WHERE stock_code = ? AND date = ?",
                 (result["code"], today)
             ).fetchone()
 
+            # 增强的分析数据（含推理链）
+            analysis_json = json.dumps({
+                "reasoning_chain": result.get("reasoning_chain", []),
+                "key_factors": result.get("key_factors", []),
+                "kg_direct_impact": result.get("kg_reasoning", {}).get("direct_impact", ""),
+                "impact_level": result.get("impact_level", "中性"),
+                "impact_score": result.get("impact_score", 0.0),
+                "ner_companies": result.get("ner_entities", {}).get("companies", []),
+                "ner_products": result.get("ner_entities", {}).get("products", []),
+                "ner_sectors": result.get("ner_entities", {}).get("sectors", []),
+                "ner_stocks": result.get("ner_entities", {}).get("stock_mentions", []),
+                "chain_reactions": result.get("chain_reactions", []),
+            }, ensure_ascii=False)
+
             if existing:
-                # 更新
                 conn.execute("""
                     UPDATE analysis SET
                         news_count = ?, avg_sentiment = ?, sentiment_std = ?,
@@ -314,7 +437,7 @@ class StockAnalyzer:
                     result["avg_sentiment"],
                     result.get("sentiment_std", 0),
                     json.dumps(result["key_topics"], ensure_ascii=False),
-                    result.get("summary", ""),
+                    f"{result.get('summary', '')}\n\n[增强分析]\n{analysis_json}",
                     result["suggestion"],
                     result["confidence"],
                     result["risk_level"],
@@ -322,7 +445,6 @@ class StockAnalyzer:
                     today,
                 ))
             else:
-                # 插入
                 conn.execute("""
                     INSERT INTO analysis (
                         stock_code, date, news_count, avg_sentiment,
@@ -336,7 +458,7 @@ class StockAnalyzer:
                     result["avg_sentiment"],
                     result.get("sentiment_std", 0),
                     json.dumps(result["key_topics"], ensure_ascii=False),
-                    result.get("summary", ""),
+                    f"{result.get('summary', '')}\n\n[增强分析]\n{analysis_json}",
                     result["suggestion"],
                     result["confidence"],
                     result["risk_level"],
@@ -347,13 +469,12 @@ class StockAnalyzer:
         except Exception as e:
             logger.error(f"保存分析结果失败 ({result['code']}): {e}")
 
-    def analyze_all_stocks(self) -> List[Dict]:
-        """
-        分析所有自选股
+    # ──────────────────────────────────────────
+    # 批量分析
+    # ──────────────────────────────────────────
 
-        Returns:
-            所有股票的分析结果列表
-        """
+    def analyze_all_stocks(self) -> List[Dict]:
+        """分析所有自选股（增强版）"""
         if not self.db:
             logger.error("数据库未初始化，无法分析")
             return []
@@ -363,7 +484,7 @@ class StockAnalyzer:
             logger.warning("自选股列表为空")
             return []
 
-        logger.info(f"开始分析所有自选股，共 {len(stocks)} 只")
+        logger.info(f"开始增强分析所有自选股，共 {len(stocks)} 只")
 
         results = []
         for stock in stocks:
@@ -372,7 +493,7 @@ class StockAnalyzer:
                 result = self.analyze_stock(code, days=1)
                 results.append(result)
             except Exception as e:
-                logger.error(f"分析 {stock.get('code', '?')} 异常: {e}", exc_info=True)
+                logger.error(f"增强分析 {stock.get('code', '?')} 异常: {e}", exc_info=True)
                 results.append({
                     "code": stock.get("code", "?"),
                     "name": stock.get("name", "未知"),
@@ -384,9 +505,15 @@ class StockAnalyzer:
                     "suggestion": "持有",
                     "confidence": 0.0,
                     "risk_level": "中",
+                    "reasoning_chain": ["分析流程异常"],
+                    "key_factors": [],
+                    "ner_entities": {},
+                    "kg_reasoning": {},
+                    "impact_evaluation": {},
+                    "chain_reactions": [],
                 })
 
-        logger.info(f"全部分析完成，成功 {len(results)}/{len(stocks)}")
+        logger.info(f"全部增强分析完成，成功 {len(results)}/{len(stocks)}")
         return results
 
     # ──────────────────────────────────────────
@@ -411,18 +538,45 @@ class StockAnalyzer:
             logger.error(f"查询分析历史失败: {e}")
             return []
 
+    def compare_stocks_impact(self) -> List[Dict]:
+        """
+        多只股票影响对比
 
-# 测试用
+        Returns:
+            按影响分绝对值排序的对比列表
+        """
+        if not self.impact_model:
+            logger.warning("影响评估模型未初始化")
+            return []
+
+        try:
+            analyses = self.analyze_all_stocks()
+            return self.impact_model.compare_stocks(analyses)
+        except Exception as e:
+            logger.error(f"影响对比分析失败: {e}")
+            return []
+
+
+# ═══════════════════════════════════════════════════
+# 测试
+# ═══════════════════════════════════════════════════
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     analyzer = StockAnalyzer()
     results = analyzer.analyze_all_stocks()
 
-    print(f"\n📊 分析结果 ({len(results)} 只股票):")
+    print(f"\n📊 增强分析结果 ({len(results)} 只股票):")
     for r in results:
-        print(f"\n{'='*50}")
+        print(f"\n{'='*60}")
         print(f"{r['name']} ({r['code']})")
-        print(f"  情绪: {r['avg_sentiment']:.2f} | 建议: {r['suggestion']}")
-        print(f"  置信度: {r['confidence']:.0%} | 风险: {r['risk_level']}")
-        print(f"  摘要: {r['summary'][:100]}")
+        print(f"  情绪: {r['avg_sentiment']:.2f}")
+        print(f"  建议: {r['suggestion']} (置信度: {r['confidence']:.0%}, 风险: {r['risk_level']})")
+        print(f"  影响等级: {r['impact_level']} (分: {r['impact_score']:.2f})")
+        print(f"  推理链:")
+        for step in r['reasoning_chain'][:5]:
+            print(f"    → {step}")
+        if r['key_factors']:
+            print(f"  关键因子: {', '.join(r['key_factors'][:4])}")
+        if r.get('chain_reactions'):
+            print(f"  连锁反应: {len(r['chain_reactions'])} 条")

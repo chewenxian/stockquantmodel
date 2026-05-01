@@ -149,7 +149,14 @@ CREATE TABLE analysis (
 - `report_generator.py` — 盘前早报/收盘晚报生成
 - `config.yaml` — 分析模块配置
 
-### 7️⃣ 配置
+### 7️⃣ AI 分析增强层 (v4.0 新增)
+- `ner_extractor.py` — 金融NER增强，基于词典+正则提取公司名/人名/产品/行业板块/股票代码
+- `knowledge_graph.py` — 轻量金融知识图谱，内置产业链关系/竞品关系/板块归属，推理新闻间接影响
+- `impact_model.py` — 情报影响评估模型，综合情感+板块热度+新闻数量+历史波动率计算影响因子
+- `advisor.py` (增强版) — 整合知识图谱推理结果，增加逻辑推演链输出
+- `stock_analyzer.py` (增强版) — 集成NER+KG+Impact评估全流程，输出推理链
+
+### 8️⃣ 配置
 - `config.yaml` — 股票池、采集频率、模型参数、分析配置
 - `stocks.csv` — 自选股列表
 
@@ -499,4 +506,186 @@ python main.py report morning
 ✅ 采集模块已完成（多数据源全面采集）
 ✅ 数据处理层已完成（清洗/去重/提取/管道编排）v2.0
 ✅ 分析模块已完成（NLP分析/情绪分析/交易建议/日报生成）v3.0
+⏳ 推送模块（待开发）
+
+---
+
+## 十、AI 分析增强层说明（v4.0）
+
+### 增强分析流程
+
+```
+┌─────────────────┐
+│  读取数据         │  ← 从数据库读取新闻/公告/行情/资金
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│  NER 实体提取    │  ← ner_extractor.py (词典+正则)
+│  - 公司名识别    │
+│  - 产品/商品识别  │
+│  - 行业板块识别   │
+│  - 股票代码识别   │
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│  知识图谱推理     │  ← knowledge_graph.py (JSON图谱)
+│  - 产业链上下游   │
+│  - 竞品关系      │
+│  - 间接影响推理   │
+│  - 连锁反应分析  │
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│  情绪分析         │  ← SentimentAnalyzer (规则+统计)
+│  + NLP 分析      │  ← NLPAnalyzer (DeepSeek API)
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│  影响评估模型     │  ← impact_model.py
+│  - 多维度评分    │
+│  - 等级判定      │
+│  - 历史对比      │
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│  增强建议生成     │  ← advisor.py (增强版)
+│  - 推理链输出    │
+│  - 关键因子提取   │
+│  - 风险评估      │
+│  结果入库+日报    │
+└─────────────────┘
+```
+
+### 模块说明
+
+#### `analyzer/ner_extractor.py` — 金融 NER 增强（v4.0 新增）
+
+基于词典匹配 + 正则的命名实体识别，不依赖 NLP 库。
+
+| 函数 | 功能 |
+|------|------|
+| `extract_company_names(text)` | 识别公司名（A股上市公司名称词典 + 模式匹配） |
+| `extract_people(text)` | 识别人名（高管/分析师/政要） |
+| `extract_products(text)` | 识别产品名（锂、碳酸锂、芯片、光伏等） |
+| `extract_industry_sectors(text)` | 识别行业板块（30+行业板块关键词） |
+| `extract_stock_mentions(text)` | 从文本中识别股票代码和名称 |
+| `extract_financial_entities(text)` | 综合金融实体提取（一次性提取所有类型） |
+
+**内置数据：** A 股前 100 常见股票代码和名称、30+ 行业板块关键词映射、20+ 产品/商品名词典
+
+#### `analyzer/knowledge_graph.py` — 金融知识图谱（v4.0 新增）
+
+轻量级知识图谱，JSON 实现，无需图数据库。
+
+| 方法 | 功能 |
+|------|------|
+| `get_chain(code_or_name)` | 获取产业链上下游关系 |
+| `get_competitors(code_or_name)` | 获取同行业竞品公司 |
+| `get_sectors(code_or_name)` | 获取股票所属行业板块 |
+| `infer_impact(code, news_text)` | 推理新闻的间接影响（含连锁反应） |
+| `get_related_stocks(text)` | 从新闻文本推理所有受影响股票 |
+
+**内置图谱数据：**
+- **产业链关系：** 锂电池、光伏、半导体、AI、医药、煤炭等 30+ 行业链，100+ 上下游关系
+- **竞品关系：** 白酒、电池、光伏、芯片、银行、保险等 20+ 行业竞争图，50+ 竞品对
+- **板块归属：** 100+ 只股票到行业板块的映射
+
+**推理示例：**
+- 输入： "碳酸锂价格暴跌" + 股票代码 "300750"（宁德时代）
+- 输出： 直接利好（成本下降），连锁反应：锂矿企业利空、电池/新能源车企业利好
+
+#### `analyzer/impact_model.py` — 情报影响评估模型（v4.0 新增）
+
+综合多维度数据计算影响因子。
+
+| 方法 | 功能 |
+|------|------|
+| `calculate_impact_factor(stock_code, sentiment, news_count, ...)` | 综合评估影响因子 |
+| `is_significant(impact_factor)` | 判断影响是否显著 |
+| `summarize(impact_factor)` | 生成影响评估摘要 |
+| `compare_stocks(analyses)` | 多只股票对比评估 |
+
+**影响等级：** 重大利好（≥0.8）> 利好（≥0.4）> 中性 > 利空（≤-0.4）> 重大利空（≤-0.8）
+
+**评估维度：**
+1. 情感维度（40%权重）：情绪得分 + 新闻数量置信度修正
+2. 板块热度（20%权重）：行业板块人气热度
+3. 新闻数量（15%权重）：关注度因子
+4. 历史波动率（10%权重）：高波动环境下情绪影响放大
+5. 异常舆情修正：突发利好/利空修正
+6. 知识图谱推理修正：产业链传导 + 竞品联动
+
+#### `analyzer/advisor.py` — 增强建议生成器（v4.0 升级）
+
+整合知识图谱推理结果到建议中，增加逻辑推演链输出。
+
+**建议输出格式（增强版）：**
+```json
+{
+  "suggestion": "强烈关注",
+  "confidence": 0.85,
+  "reasoning": [
+    "碳酸锂价格暴跌 → 电池成本降低",
+    "公司产能扩张中 → 受益于成本下降",
+    "板块热度上升 → 资金关注度高"
+  ],
+  "risk_level": "低",
+  "key_factors": ["成本下降", "产能扩张", "板块热度"],
+  "impact_evaluation": { "impact_score": 0.75, "level": "利好" },
+  "kg_reasoning": { "direct_impact": "利好", "chain_reactions": [...] }
+}
+```
+
+**建议等级：** 强烈关注 > 关注 > 持有 > 观望 > 回避 > 强烈回避
+
+#### `analyzer/stock_analyzer.py` — 个股分析入口（v4.0 升级）
+
+在分析流程中集成 NER、知识图谱、影响评估模型，增加推理链输出。
+
+| 方法 | 功能 |
+|------|------|
+| `analyze_stock(code, days)` | 对单只股票完整分析（含推理链） |
+| `analyze_all_stocks()` | 分析所有自选股（增强版） |
+| `compare_stocks_impact()` | 多只股票影响对比 |
+
+**分析结果新增字段：**
+- `ner_entities` — 提取的金融实体
+- `kg_reasoning` — 知识图谱推理结果
+- `impact_evaluation` — 影响评估结果
+- `reasoning_chain` — 推理链列表
+- `key_factors` — 关键影响因子
+- `chain_reactions` — 连锁反应列表
+- `impact_level` / `impact_score` — 影响等级和分数
+
+### 使用方式
+
+```python
+from analyzer.stock_analyzer import StockAnalyzer
+
+analyzer = StockAnalyzer()
+
+# 增强分析一只股票
+result = analyzer.analyze_stock("300750", days=3)
+print(result["reasoning_chain"])  # 查看推理链
+print(result["key_factors"])      # 查看关键因子
+
+# 所有股票对比
+comparison = analyzer.compare_stocks_impact()
+```
+
+### 技术要求
+- 所有模块纯 Python 实现，不依赖外部图数据库
+- 知识图谱数据内嵌在代码中（覆盖30+行业链，100+关系）
+- NER 使用词典匹配 + 正则，不依赖 NLP 库
+- 全 try/except 保护，不中断主流程
+- 每个模块可独立测试（`python analyzer/xxx.py`）
+
+---
+
+## 项目状态
+
+✅ 采集模块已完成（多数据源全面采集）
+✅ 数据处理层已完成（清洗/去重/提取/管道编排）v2.0
+✅ 分析模块已完成（NLP分析/情绪分析/交易建议/日报生成）v3.0
+✅ AI 分析增强层已完成（NER/知识图谱/影响评估/推理链）v4.0
 ⏳ 推送模块（待开发）
