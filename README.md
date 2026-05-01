@@ -135,7 +135,13 @@ CREATE TABLE analysis (
 - `report.py` — 生成日报
 - `notifier.py` — 推送到微信
 
-### 5️⃣ 配置
+### 5️⃣ 数据处理层 `processor/` (v2.0 新增)
+- `cleaner.py` — HTML清洗、文本规范化、广告噪音去除
+- `deduplicator.py` — SimHash 64位指纹去重，滑动窗口O(n)复杂度
+- `extractor.py` — 关键词提取、股票代码检测、新闻分类、实体提取
+- `pipeline.py` — 管道编排：clean→dedup→extract 一站式处理
+
+### 6️⃣ 配置
 - `config.yaml` — 股票池、采集频率、模型参数
 - `stocks.csv` — 自选股列表
 
@@ -147,8 +153,11 @@ CREATE TABLE analysis (
 ```
 1. 读取自选股列表
 2. 遍历各财经源抓取相关新闻
-3. 去重、清洗、存入 SQLite
-4. 调用 DeepSeek API 做摘要 + 情绪分析
+3. 数据清洗（去除HTML标签、广告噪音、规范化文本）
+4. SimHash 去重（避免重复存储相似内容）
+5. 特征提取（关键词、股票代码、分类、实体）
+6. 存入 SQLite（含 FTS5 全文索引）
+7. 调用 DeepSeek API 做摘要 + 情绪分析
 ```
 
 ### 定时分析 (每天 16:00 收盘后)
@@ -163,6 +172,13 @@ CREATE TABLE analysis (
 ```
 1. 生成日报文本
 2. 通过 OpenClaw 微信通道推送给你
+```
+
+### 数据归档 (每天凌晨)
+```
+1. 自动归档30天前的旧新闻
+2. 释放主表空间
+3. FTS 索引同步更新
 ```
 
 ---
@@ -206,9 +222,15 @@ stockquantmodel/
 │       ├── xueqiu.py       ← 雪球(热榜/讨论/情绪)
 │       ├── cninfo.py       ← 巨潮资讯(公司公告)
 │       └── policy_collector.py ← 财联社/华尔街(政策快讯)
+├── processor/              ← (v2.0 新增) 数据处理层
+│   ├── __init__.py
+│   ├── cleaner.py          ← HTML清洗/文本规范化
+│   ├── deduplicator.py     ← SimHash去重
+│   ├── extractor.py        ← 关键词/股票代码/分类/实体提取
+│   └── pipeline.py         ← 管道编排
 ├── storage/
 │   ├── __init__.py
-│   └── database.py         ← SQLite 12表
+│   └── database.py         ← SQLite 14表 + FTS5全文搜索
 ├── analyzer/
 │   └── __init__.py
 └── output/
@@ -234,9 +256,112 @@ stockquantmodel/
 
 ---
 
+---
+
+## 八、数据处理层说明（v2.0）
+
+### 清洗模块 `processor/cleaner.py`
+
+| 组件 | 功能 |
+|------|------|
+| `HTMLCleaner.strip_tags()` | 去除HTML标签、script、style、注释 |
+| `HTMLCleaner.remove_ad_noise()` | 去广告/免责声明/二维码/分享等噪音 |
+| `HTMLCleaner.decode_html_entities()` | 解码 `&amp;`、`&#39;` 等实体 |
+| `TextNormalizer` | 全半角转换、空白折叠、标点规范化 |
+| `clean_text(text)` | 一站式清洗（实体解码→去标签→去噪音→规范化） |
+| `extract_clean_content(html)` | 从HTML提取干净正文（利用BeautifulSoup定位正文容器） |
+
+### 去重模块 `processor/deduplicator.py`
+
+- **SimHash 64位指纹**：基于4-gram + TF权重，纯Python实现
+- `hamming_distance(hash1, hash2)`：计算汉明距离
+- `dedup(news_list, threshold=3)`：滑动窗口去重（O(n)复杂度）
+  - `threshold=3`：允许最多3bit差异视为重复
+  - `window_size=100`：滑动窗口控制内存
+- 文本太短时自动回退到精确字符串比较
+
+### 提取模块 `processor/extractor.py`
+
+| 函数 | 功能 |
+|------|------|
+| `extract_keywords(text, top=10)` | 基于TF的关键词提取（2-gram + 4-gram） |
+| `detect_stock_codes(text)` | 检测沪深京股票代码（6位数字） |
+| `categorize_news(title, content)` | 分类：业绩/重组/政策/行业/市场/其他 |
+| `extract_entities(text)` | 提取公司名/人名/金额/百分比 |
+
+### 管道模块 `processor/pipeline.py`
+
+```python
+# 单篇处理
+result = process_article(raw_article)
+# result 新增字段: clean_title, clean_content, keywords, category,
+#                   stock_codes, entities, content_hash, processed
+
+# 批量处理（自动去重）
+results = process_batch(raw_list)
+```
+
+### 数据库升级 `storage/database.py` (v2.0)
+
+**新增功能：**
+- **FTS5 全文搜索**：`create_fts_index()` + `search_news(keyword, limit=20)`
+- **内容去重**：`get_by_content_hash(content_hash)`，`news` 和 `announcements` 表新增 `content_hash` 列
+- **字段扩展**：`news` 表新增 `category`、`keywords`、`processed`；`announcements` 表新增 `category`、`content_hash`
+- **数据归档**：`archive_old_data(days=30)` → 旧数据移至 `news_archive` / `announcements_archive` 备份表
+- **数据库统计**：`get_stats()` → 返回表大小、分类分布、来源分布、处理进度等完整统计
+- **增量迁移**：`_migrate_schema()` 自动为新版字段做 ALTER TABLE
+
+**使用示例：**
+```python
+from storage.database import Database
+from processor.pipeline import process_batch
+
+db = Database("data/stock_news.db")
+
+# 创建FTS索引
+db.create_fts_index()
+
+# 处理并存储
+processed = process_batch(news_list)
+for article in processed:
+    if not db.get_by_content_hash(article["content_hash"]):
+        db.insert_news(
+            title=article["clean_title"],
+            url=article["url"],
+            source=article["source"],
+            content=article["clean_content"],
+            category=article["category"],
+            keywords=",".join(article["keywords"]),
+            content_hash=article["content_hash"]
+        )
+
+# 搜索
+hits = db.search_news("贵州茅台")
+
+# 查看统计
+stats = db.get_stats()
+print(f"数据库大小: {stats['db_size_mb']}MB")
+print(f"新闻总数: {stats['total_news']}")
+print(f"分类分布: {stats['categories']}")
+
+# 归档30天前数据
+result = db.archive_old_data(days=30)
+print(f"已归档: {result}")
+```
+
+### 技术要求
+- 所有处理函数含 try/except，不中断流程
+- SimHash 纯 Python 实现，无外部依赖
+- 低内存占用，适合 2GB 服务器
+- utf-8 编码，正确处理中文
+- 每个模块可独立测试
+
+---
+
 ## 项目状态
 
 ✅ 采集模块已完成（多数据源全面采集）
+✅ 数据处理层已完成（清洗/去重/提取/管道编排）v2.0
 ⏳ 分析模块（待开发）
 ⏳ 推送模块（待开发）
 

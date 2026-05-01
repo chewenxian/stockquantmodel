@@ -1,25 +1,59 @@
 """
 SQLite 数据库模块
 存储：新闻、公告、行情、资金流向、分析结果等
+
+v2.0 新增:
+- FTS5 全文搜索
+- 内容去重 (content_hash)
+- 字段扩展 (category, keywords, processed)
+- 数据归档
+- 数据库统计
 """
+import json
 import sqlite3
 import os
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class Database:
     def __init__(self, db_path: str = "data/stock_news.db"):
-        os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+        self._conn = None
         self.db_path = db_path
+        if db_path != ":memory:":
+            os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self._init_tables()
+        self._migrate_schema()
 
     def _connect(self):
+        """获取数据库连接。对 :memory: 数据库只创建一个共享连接。"""
+        if self.db_path == ":memory:" and self._conn is not None:
+            return self._conn
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        if self.db_path == ":memory:":
+            self._conn = conn
         return conn
+
+    def _close(self, conn):
+        """安全关闭连接，不关闭共享的 :memory: 连接"""
+        if self.db_path == ":memory:":
+            return  # 共享连接，不关闭
+        try:
+            self._close(conn)
+        except Exception:
+            pass
+
+    def close(self):
+        """关闭所有连接（仅用于清理）"""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
     def _init_tables(self):
         conn = self._connect()
@@ -198,13 +232,224 @@ class Database:
                 started_at DATETIME,
                 finished_at DATETIME
             );
+
+            -- 13. 归档数据（新闻归档）
+            CREATE TABLE IF NOT EXISTS news_archive (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_id INTEGER,
+                title TEXT NOT NULL,
+                url TEXT,
+                source TEXT,
+                summary TEXT,
+                content TEXT,
+                category TEXT,
+                keywords TEXT,
+                published_at DATETIME,
+                archived_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- 14. 归档数据（公告归档）
+            CREATE TABLE IF NOT EXISTS announcements_archive (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_id INTEGER,
+                stock_code TEXT NOT NULL,
+                title TEXT NOT NULL,
+                url TEXT,
+                announce_type TEXT,
+                summary TEXT,
+                category TEXT,
+                publish_date DATE,
+                archived_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         conn.commit()
-        conn.close()
+        self._close(conn)
 
-    # ---- CRUD 操作 ----
+    def _migrate_schema(self):
+        """
+        增量迁移：为新版表结构添加缺失的列
+        避免因 ALTER TABLE 失败导致程序崩溃
+        """
+        conn = self._connect()
+        cur = conn.cursor()
 
-    def upsert_stock(self, code: str, name: str, market: str = "SH", reason: str = "", industry: str = ""):
+        migrations = [
+            # news 表新增列
+            ("ALTER TABLE news ADD COLUMN content_hash TEXT",
+             "SELECT content_hash FROM news LIMIT 1"),
+            ("ALTER TABLE news ADD COLUMN category TEXT DEFAULT '其他'",
+             "SELECT category FROM news LIMIT 1"),
+            ("ALTER TABLE news ADD COLUMN keywords TEXT DEFAULT ''",
+             "SELECT keywords FROM news LIMIT 1"),
+            ("ALTER TABLE news ADD COLUMN processed INTEGER DEFAULT 0",
+             "SELECT processed FROM news LIMIT 1"),
+
+            # announcements 表新增列
+            ("ALTER TABLE announcements ADD COLUMN content_hash TEXT",
+             "SELECT content_hash FROM announcements LIMIT 1"),
+            ("ALTER TABLE announcements ADD COLUMN category TEXT DEFAULT '其他'",
+             "SELECT category FROM announcements LIMIT 1"),
+        ]
+
+        for alter_sql, check_sql in migrations:
+            try:
+                cur.execute(check_sql)
+            except sqlite3.OperationalError:
+                try:
+                    cur.execute(alter_sql)
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
+
+        conn.commit()
+        self._close(conn)
+
+    # ═══════════════════════════════════════════
+    # FTS5 全文搜索
+    # ═══════════════════════════════════════════
+
+    def create_fts_index(self):
+        """
+        为 news 表创建 FTS5 虚拟表
+        支持中文全文搜索（需 SQLite 启用 FTS5）
+
+        如果已存在则不重复创建
+        """
+        conn = self._connect()
+        cur = conn.cursor()
+        try:
+            # 检查 FTS5 扩展是否可用
+            cur.execute("SELECT json_extract('{\"a\":1}', '$.a')")
+        except sqlite3.OperationalError:
+            pass  # JSON1 可用
+
+        try:
+            # 创建 FTS5 虚拟表
+            cur.executescript("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS news_fts USING fts5(
+                    title, content, summary, source,
+                    content=news,
+                    content_rowid=id
+                );
+
+                -- 初始同步已有数据
+                INSERT OR IGNORE INTO news_fts(rowid, title, content, summary, source)
+                SELECT id, title, content, summary, source FROM news;
+            """)
+            conn.commit()
+
+            # 创建触发器保持同步
+            cur.executescript("""
+                CREATE TRIGGER IF NOT EXISTS news_ai AFTER INSERT ON news BEGIN
+                    INSERT INTO news_fts(rowid, title, content, summary, source)
+                    VALUES (new.id, new.title, new.content, new.summary, new.source);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS news_ad AFTER DELETE ON news BEGIN
+                    INSERT INTO news_fts(news_fts, rowid, title, content, summary, source)
+                    VALUES ('delete', old.id, old.title, old.content, old.summary, old.source);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS news_au AFTER UPDATE ON news BEGIN
+                    INSERT INTO news_fts(news_fts, rowid, title, content, summary, source)
+                    VALUES ('delete', old.id, old.title, old.content, old.summary, old.source);
+                    INSERT INTO news_fts(rowid, title, content, summary, source)
+                    VALUES (new.id, new.title, new.content, new.summary, new.source);
+                END;
+            """)
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            # FTS5 可能未启用
+            pass
+        finally:
+            self._close(conn)
+
+    def search_news(self, keyword: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        FTS5 全文搜索新闻
+
+        Args:
+            keyword: 搜索关键词（支持中文）
+            limit: 返回条数上限
+
+        Returns:
+            匹配的新闻列表
+        """
+        conn = self._connect()
+        try:
+            # 对中文关键词做空格分词（FTS5 默认空格分词）
+            # 将中文字符之间加空格，让 FTS5 的 unicode61 分词器能识别单个汉字
+            spaced_keyword = " OR ".join(keyword.strip().split())
+            if not spaced_keyword:
+                spaced_keyword = keyword
+
+            rows = conn.execute("""
+                SELECT n.*, rank
+                FROM news_fts
+                JOIN news n ON news_fts.rowid = n.id
+                WHERE news_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+            """, (spaced_keyword, limit)).fetchall()
+            self._close(conn)
+            return [dict(r) for r in rows]
+
+        except (sqlite3.OperationalError, sqlite3.ProgrammingError):
+            # FTS5 不可用或搜索失败，回退到 LIKE 查询
+            self._close(conn)
+            return self._search_news_fallback(keyword, limit)
+
+    def _search_news_fallback(self, keyword: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """LIKE 模糊搜索回退"""
+        conn = self._connect()
+        like_pattern = f"%{keyword}%"
+        rows = conn.execute("""
+            SELECT * FROM news
+            WHERE title LIKE ? OR content LIKE ? OR summary LIKE ?
+            ORDER BY published_at DESC
+            LIMIT ?
+        """, (like_pattern, like_pattern, like_pattern, limit)).fetchall()
+        self._close(conn)
+        return [dict(r) for r in rows]
+
+    # ═══════════════════════════════════════════
+    # 内容去重
+    # ═══════════════════════════════════════════
+
+    def get_by_content_hash(self, content_hash: str) -> bool:
+        """
+        检查内容哈希是否已存在于news或announcements表中
+
+        Args:
+            content_hash: 内容哈希值
+
+        Returns:
+            True 表示已存在（重复）
+        """
+        if not content_hash:
+            return False
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT 1 FROM news WHERE content_hash = ? LIMIT 1",
+            (content_hash,)
+        ).fetchone()
+
+        if row:
+            self._close(conn)
+            return True
+
+        row = conn.execute(
+            "SELECT 1 FROM announcements WHERE content_hash = ? LIMIT 1",
+            (content_hash,)
+        ).fetchone()
+        self._close(conn)
+        return row is not None
+
+    # ═══════════════════════════════════════════
+    # CRUD 操作（扩展版）
+    # ═══════════════════════════════════════════
+
+    def upsert_stock(self, code: str, name: str, market: str = "SH",
+                     reason: str = "", industry: str = ""):
         conn = self._connect()
         conn.execute("""
             INSERT INTO stocks(code, name, market, reason, industry)
@@ -212,37 +457,77 @@ class Database:
             ON CONFLICT(code) DO UPDATE SET name=excluded.name, reason=excluded.reason
         """, (code, name, market, reason, industry))
         conn.commit()
-        conn.close()
+        self._close(conn)
 
     def load_stocks(self):
         conn = self._connect()
-        rows = conn.execute("SELECT code, name, market FROM stocks").fetchall()
-        conn.close()
+        rows = conn.execute(
+            "SELECT code, name, market FROM stocks"
+        ).fetchall()
+        self._close(conn)
         return [dict(r) for r in rows]
 
-    def insert_news(self, title: str, url: str, source: str, summary: str = "",
-                    content: str = "", published_at: str = None) -> Optional[int]:
+    def insert_news(self, title: str, url: str, source: str,
+                    summary: str = "", content: str = "",
+                    published_at: str = None,
+                    category: str = "其他",
+                    keywords: str = "",
+                    content_hash: str = "") -> Optional[int]:
         try:
             conn = self._connect()
             cur = conn.execute("""
-                INSERT OR IGNORE INTO news(title, url, source, summary, content, published_at)
-                VALUES(?, ?, ?, ?, ?, ?)
-            """, (title, url, source, summary, content, published_at))
+                INSERT OR IGNORE INTO news(
+                    title, url, source, summary, content,
+                    published_at, category, keywords, content_hash
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (title, url, source, summary, content,
+                  published_at, category, keywords, content_hash))
             conn.commit()
             last_id = cur.lastrowid
-            conn.close()
+            self._close(conn)
             return last_id
         except Exception:
             return None
 
-    def link_news_stock(self, news_id: int, stock_code: str, sentiment: float = 0.0):
+    def update_news_analysis(self, news_id: int, category: str = None,
+                              keywords: str = None, processed: bool = True):
+        """更新新闻的分析结果字段"""
+        try:
+            conn = self._connect()
+            updates = []
+            params = []
+            if category is not None:
+                updates.append("category = ?")
+                params.append(category)
+            if keywords is not None:
+                # 如果keywords是列表，转为逗号分隔字符串
+                if isinstance(keywords, list):
+                    keywords = ",".join(keywords)
+                updates.append("keywords = ?")
+                params.append(keywords)
+            updates.append("processed = ?")
+            params.append(1 if processed else 0)
+            params.append(news_id)
+
+            conn.execute(f"""
+                UPDATE news SET {', '.join(updates)}
+                WHERE id = ?
+            """, params)
+            conn.commit()
+            self._close(conn)
+            return True
+        except Exception:
+            return False
+
+    def link_news_stock(self, news_id: int, stock_code: str,
+                         sentiment: float = 0.0):
         conn = self._connect()
         conn.execute("""
             INSERT OR IGNORE INTO news_stocks(news_id, stock_code, sentiment)
             VALUES(?, ?, ?)
         """, (news_id, stock_code, sentiment))
         conn.commit()
-        conn.close()
+        self._close(conn)
 
     def insert_market_snapshot(self, code: str, price: float, change_pct: float,
                                 volume: float, amount: float, **kwargs):
@@ -257,19 +542,24 @@ class Database:
               kwargs.get('turnover_rate'), kwargs.get('pe'),
               kwargs.get('pb'), kwargs.get('total_mv')))
         conn.commit()
-        conn.close()
+        self._close(conn)
 
     def insert_announcement(self, code: str, title: str, url: str,
-                            announce_type: str = "", summary: str = "",
-                            publish_date: str = None):
+                             announce_type: str = "", summary: str = "",
+                             publish_date: str = None,
+                             category: str = "其他",
+                             content_hash: str = ""):
         try:
             conn = self._connect()
             conn.execute("""
-                INSERT OR IGNORE INTO announcements(stock_code, title, url, announce_type, summary, publish_date)
-                VALUES(?, ?, ?, ?, ?, ?)
-            """, (code, title, url, announce_type, summary, publish_date))
+                INSERT OR IGNORE INTO announcements(
+                    stock_code, title, url, announce_type,
+                    summary, publish_date, category, content_hash
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """, (code, title, url, announce_type,
+                  summary, publish_date, category, content_hash))
             conn.commit()
-            conn.close()
+            self._close(conn)
             return True
         except Exception:
             return False
@@ -279,56 +569,231 @@ class Database:
                            large_order_net: float = 0, total_amount: float = 0):
         conn = self._connect()
         conn.execute("""
-            INSERT INTO money_flow(stock_code, date, main_net, retail_net, north_net, large_order_net, total_amount)
+            INSERT INTO money_flow(stock_code, date, main_net, retail_net,
+                                   north_net, large_order_net, total_amount)
             VALUES(?, ?, ?, ?, ?, ?, ?)
-        """, (code, date, main_net, retail_net, north_net, large_order_net, total_amount))
+        """, (code, date, main_net, retail_net,
+              north_net, large_order_net, total_amount))
         conn.commit()
-        conn.close()
+        self._close(conn)
 
-    def insert_policy(self, title: str, url: str, source: str, department: str = "",
-                       summary: str = "", publish_date: str = None, related_sectors: str = ""):
+    def insert_policy(self, title: str, url: str, source: str,
+                       department: str = "", summary: str = "",
+                       publish_date: str = None, related_sectors: str = ""):
         try:
             conn = self._connect()
             conn.execute("""
-                INSERT OR IGNORE INTO policies(title, url, source, department, summary, publish_date, related_sectors)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
-            """, (title, url, source, department, summary, publish_date, related_sectors))
+                INSERT OR IGNORE INTO policies(
+                    title, url, source, department, summary,
+                    publish_date, related_sectors
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            """, (title, url, source, department, summary,
+                  publish_date, related_sectors))
             conn.commit()
-            conn.close()
+            self._close(conn)
             return True
         except Exception:
             return False
 
     def insert_macro(self, indicator: str, value: float, unit: str = "",
-                      release_date: str = None, source: str = "", summary: str = ""):
+                      release_date: str = None, source: str = "",
+                      summary: str = ""):
         conn = self._connect()
         conn.execute("""
             INSERT INTO macro_data(indicator, value, unit, release_date, source, summary)
             VALUES(?, ?, ?, ?, ?, ?)
         """, (indicator, value, unit, release_date, source, summary))
         conn.commit()
-        conn.close()
+        self._close(conn)
 
     def log_collect(self, source: str, data_type: str, count: int = 0,
                      status: str = "success", error_msg: str = ""):
         conn = self._connect()
         conn.execute("""
-            INSERT INTO collect_logs(source, data_type, item_count, status, error_msg, started_at, finished_at)
-            VALUES(?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            INSERT INTO collect_logs(
+                source, data_type, item_count, status, error_msg,
+                started_at, finished_at
+            ) VALUES(?, ?, ?, ?, ?, datetime('now'), datetime('now'))
         """, (source, data_type, count, status, error_msg))
         conn.commit()
-        conn.close()
+        self._close(conn)
 
-    # ---- 统计查询 ----
+    # ═══════════════════════════════════════════
+    # 数据归档
+    # ═══════════════════════════════════════════
+
+    def archive_old_data(self, days: int = 30) -> Dict[str, int]:
+        """
+        将指定天数前的旧数据归档到备份表，并从原表删除
+
+        Args:
+            days: 归档多少天前的数据（默认30天）
+
+        Returns:
+            {"news": 归档新闻数, "announcements": 归档公告数}
+        """
+        conn = self._connect()
+        result = {"news": 0, "announcements": 0}
+
+        try:
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+
+            # 归档新闻
+            cur = conn.execute("""
+                INSERT OR IGNORE INTO news_archive(
+                    original_id, title, url, source, summary, content,
+                    category, keywords, published_at
+                )
+                SELECT id, title, url, source, summary, content,
+                       category, keywords, published_at
+                FROM news
+                WHERE published_at < ? AND published_at IS NOT NULL
+            """, (cutoff,))
+            archived_news = cur.rowcount
+            result["news"] = archived_news if archived_news > 0 else 0
+
+            if archived_news > 0:
+                # 删除已归档的旧新闻
+                conn.execute("""
+                    DELETE FROM news
+                    WHERE published_at < ? AND published_at IS NOT NULL
+                """, (cutoff,))
+                # 同步更新 FTS
+                conn.execute("""
+                    INSERT INTO news_fts(news_fts, rowid, title, content, summary, source)
+                    SELECT 'delete', id, title, content, summary, source
+                    FROM news
+                    WHERE published_at < ? AND published_at IS NOT NULL
+                """, (cutoff,))
+
+            # 归档公告
+            cur = conn.execute("""
+                INSERT OR IGNORE INTO announcements_archive(
+                    original_id, stock_code, title, url, announce_type,
+                    summary, category, publish_date
+                )
+                SELECT id, stock_code, title, url, announce_type,
+                       summary, category, publish_date
+                FROM announcements
+                WHERE publish_date < ? AND publish_date IS NOT NULL
+            """, (cutoff,))
+            archived_ann = cur.rowcount
+            result["announcements"] = archived_ann if archived_ann > 0 else 0
+
+            if archived_ann > 0:
+                conn.execute("""
+                    DELETE FROM announcements
+                    WHERE publish_date < ? AND publish_date IS NOT NULL
+                """, (cutoff,))
+
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            self._close(conn)
+
+        return result
+
+    # ═══════════════════════════════════════════
+    # 数据库统计
+    # ═══════════════════════════════════════════
+
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        返回数据库统计信息
+
+        Returns:
+            {
+                "total_news": int,
+                "today_news": int,
+                "total_announcements": int,
+                "total_stocks": int,
+                "total_policies": int,
+                "total_analysis": int,
+                "processed_news": int,
+                "unprocessed_news": int,
+                "db_size_mb": float,
+                "oldest_news_date": str or None,
+                "newest_news_date": str or None,
+                "categories": {"业绩": n, "重组": n, ...},
+            }
+        """
+        stats: Dict[str, Any] = {}
+        conn = self._connect()
+        try:
+            # 基础计数
+            for name, table in [
+                ("total_news", "news"),
+                ("total_announcements", "announcements"),
+                ("total_stocks", "stocks"),
+                ("total_policies", "policies"),
+                ("total_analysis", "analysis"),
+            ]:
+                row = conn.execute(f"SELECT COUNT(*) as cnt FROM {table}").fetchone()
+                stats[name] = row["cnt"] if row else 0
+
+            # 处理状态
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM news WHERE processed = 1"
+            ).fetchone()
+            stats["processed_news"] = row["cnt"] if row else 0
+
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM news WHERE processed = 0 OR processed IS NULL"
+            ).fetchone()
+            stats["unprocessed_news"] = row["cnt"] if row else 0
+
+            # 今日新闻
+            row = conn.execute("""
+                SELECT COUNT(*) as cnt FROM news
+                WHERE date(collected_at) = date('now', 'localtime')
+            """).fetchone()
+            stats["today_news"] = row["cnt"] if row else 0
+
+            # 日期范围
+            row = conn.execute(
+                "SELECT MIN(published_at) as min_d, MAX(published_at) as max_d FROM news"
+            ).fetchone()
+            if row:
+                stats["oldest_news_date"] = row["min_d"]
+                stats["newest_news_date"] = row["max_d"]
+
+            # 分类统计
+            rows = conn.execute("""
+                SELECT category, COUNT(*) as cnt FROM news
+                WHERE category IS NOT NULL AND category != ''
+                GROUP BY category ORDER BY cnt DESC
+            """).fetchall()
+            stats["categories"] = {r["category"]: r["cnt"] for r in rows}
+
+            # 数据库文件大小
+            try:
+                stats["db_size_mb"] = round(os.path.getsize(self.db_path) / (1024 * 1024), 2)
+            except OSError:
+                stats["db_size_mb"] = 0
+
+            # 来源分布
+            rows = conn.execute("""
+                SELECT source, COUNT(*) as cnt FROM news
+                WHERE source IS NOT NULL AND source != ''
+                GROUP BY source ORDER BY cnt DESC
+            """).fetchall()
+            stats["sources"] = {r["source"]: r["cnt"] for r in rows}
+
+        except Exception:
+            pass
+        finally:
+            self._close(conn)
+
+        return stats
+
+    # ═══════════════════════════════════════════
+    # 旧版统计查询（兼容）
+    # ═══════════════════════════════════════════
 
     def get_today_news_count(self) -> int:
-        conn = self._connect()
-        row = conn.execute("""
-            SELECT COUNT(*) as cnt FROM news
-            WHERE date(collected_at) = date('now', 'localtime')
-        """).fetchone()
-        conn.close()
-        return row['cnt'] if row else 0
+        stats = self.get_stats()
+        return stats.get("today_news", 0)
 
     def get_stock_news_sentiment(self, code: str, days: int = 1):
         conn = self._connect()
@@ -340,5 +805,5 @@ class Database:
               AND n.published_at >= datetime('now', ? || ' days', 'localtime')
             ORDER BY n.published_at DESC
         """, (code, f'-{days}')).fetchall()
-        conn.close()
+        self._close(conn)
         return [dict(r) for r in rows]
