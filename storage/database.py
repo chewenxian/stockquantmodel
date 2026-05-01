@@ -42,7 +42,7 @@ class Database:
         if self.db_path == ":memory:":
             return  # 共享连接，不关闭
         try:
-            self._close(conn)
+            conn.close()
         except Exception:
             pass
 

@@ -28,6 +28,8 @@ import os
 import logging
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
+
 # 确保项目根目录在路径中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
