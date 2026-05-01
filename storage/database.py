@@ -261,6 +261,39 @@ class Database:
                 publish_date DATE,
                 archived_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+
+            -- 15. 回测信号记录
+            CREATE TABLE IF NOT EXISTS backtest_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_code TEXT NOT NULL,
+                signal_date DATE NOT NULL,
+                suggestion TEXT,
+                confidence REAL,
+                sentiment REAL,
+                price_at_signal REAL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(stock_code) REFERENCES stocks(code)
+            );
+            CREATE INDEX IF NOT EXISTS idx_bts_stock_date ON backtest_signals(stock_code, signal_date DESC);
+
+            -- 16. 回测结果
+            CREATE TABLE IF NOT EXISTS backtest_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_code TEXT NOT NULL,
+                start_date DATE,
+                end_date DATE,
+                total_return REAL,
+                annual_return REAL,
+                max_drawdown REAL,
+                win_rate REAL,
+                trade_count INTEGER,
+                sharpe_ratio REAL,
+                benchmark_return REAL,
+                alpha REAL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(stock_code) REFERENCES stocks(code)
+            );
+            CREATE INDEX IF NOT EXISTS idx_btr_stock ON backtest_results(stock_code);
         """)
         conn.commit()
         self._close(conn)
@@ -811,6 +844,178 @@ class Database:
     # ═══════════════════════════════════════════
     # 分析模块专用查询方法
     # ═══════════════════════════════════════════
+
+    # ═══════════════════════════════════════════
+    # 回测相关方法
+    # ═══════════════════════════════════════════
+
+    def record_backtest_signal(self, stock_code: str, signal_date: str,
+                                 suggestion: str, confidence: float = 0.0,
+                                 sentiment: float = 0.0,
+                                 price_at_signal: Optional[float] = None) -> bool:
+        """记录回测信号到数据库"""
+        try:
+            conn = self._connect()
+            conn.execute("""
+                INSERT INTO backtest_signals(
+                    stock_code, signal_date, suggestion,
+                    confidence, sentiment, price_at_signal
+                ) VALUES(?, ?, ?, ?, ?, ?)
+            """, (stock_code, signal_date, suggestion,
+                   confidence, sentiment, price_at_signal))
+            conn.commit()
+            self._close(conn)
+            return True
+        except Exception as e:
+            return False
+
+    def get_backtest_signals(self, stock_code: str,
+                              start_date: str = None,
+                              end_date: str = None) -> List[Dict]:
+        """获取某只股票的回测信号"""
+        try:
+            conn = self._connect()
+            sql = "SELECT * FROM backtest_signals WHERE stock_code = ?"
+            params = [stock_code]
+            if start_date:
+                sql += " AND signal_date >= ?"
+                params.append(start_date)
+            if end_date:
+                sql += " AND signal_date <= ?"
+                params.append(end_date)
+            sql += " ORDER BY signal_date ASC"
+            rows = conn.execute(sql, params).fetchall()
+            self._close(conn)
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def get_all_backtest_signals(self) -> List[Dict]:
+        """获取所有回测信号"""
+        try:
+            conn = self._connect()
+            rows = conn.execute("""
+                SELECT bs.*, s.name as stock_name
+                FROM backtest_signals bs
+                LEFT JOIN stocks s ON bs.stock_code = s.code
+                ORDER BY bs.signal_date DESC
+            """).fetchall()
+            self._close(conn)
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def save_backtest_result(self, stock_code: str, start_date: str,
+                              end_date: str, result: Dict) -> bool:
+        """保存回测结果"""
+        try:
+            conn = self._connect()
+            # upsert
+            existing = conn.execute(
+                "SELECT id FROM backtest_results WHERE stock_code = ? AND start_date = ? AND end_date = ?",
+                (stock_code, start_date, end_date)
+            ).fetchone()
+            if existing:
+                conn.execute("""UPDATE backtest_results SET
+                    total_return=?, annual_return=?, max_drawdown=?,
+                    win_rate=?, trade_count=?, sharpe_ratio=?,
+                    benchmark_return=?, alpha=?
+                    WHERE id=?
+                """, (
+                    result.get("total_return", 0),
+                    result.get("annual_return", 0),
+                    result.get("max_drawdown", 0),
+                    result.get("win_rate", 0),
+                    result.get("trade_count", 0),
+                    result.get("sharpe_ratio", 0),
+                    result.get("benchmark_return", 0),
+                    result.get("alpha", 0),
+                    existing["id"]
+                ))
+            else:
+                conn.execute("""INSERT INTO backtest_results(
+                    stock_code, start_date, end_date, total_return,
+                    annual_return, max_drawdown, win_rate, trade_count,
+                    sharpe_ratio, benchmark_return, alpha
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+                    stock_code, start_date, end_date,
+                    result.get("total_return", 0),
+                    result.get("annual_return", 0),
+                    result.get("max_drawdown", 0),
+                    result.get("win_rate", 0),
+                    result.get("trade_count", 0),
+                    result.get("sharpe_ratio", 0),
+                    result.get("benchmark_return", 0),
+                    result.get("alpha", 0),
+                ))
+            conn.commit()
+            self._close(conn)
+            return True
+        except Exception:
+            return False
+
+    def get_backtest_results(self, stock_code: str = None) -> List[Dict]:
+        """获取回测结果"""
+        try:
+            conn = self._connect()
+            if stock_code:
+                rows = conn.execute(
+                    "SELECT * FROM backtest_results WHERE stock_code = ? ORDER BY created_at DESC",
+                    (stock_code,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT br.*, s.name as stock_name FROM backtest_results br LEFT JOIN stocks s ON br.stock_code = s.code ORDER BY br.created_at DESC"
+                ).fetchall()
+            self._close(conn)
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def get_all_backtest_signals_grouped(self) -> Dict[str, List[Dict]]:
+        """按股票代码分组获取所有回测信号"""
+        signals = self.get_all_backtest_signals()
+        grouped = {}
+        for s in signals:
+            code = s["stock_code"]
+            if code not in grouped:
+                grouped[code] = []
+            grouped[code].append(s)
+        return grouped
+
+    def get_price_history(self, code: str, start_date: str = None,
+                           end_date: str = None) -> List[Dict]:
+        """
+        获取某只股票的历史价格序列（从market_snapshots按日聚合）
+        返回按日期升序排列的{date, price, change_pct, volume}列表
+        """
+        try:
+            conn = self._connect()
+            sql = """
+                SELECT date(snapshot_time) as trade_date,
+                       price,
+                       change_pct,
+                       volume,
+                       amount
+                FROM market_snapshots
+                WHERE stock_code = ?
+            """
+            params = [code]
+            if start_date:
+                sql += " AND date(snapshot_time) >= ?"
+                params.append(start_date)
+            if end_date:
+                sql += " AND date(snapshot_time) <= ?"
+                params.append(end_date)
+            sql += """
+                GROUP BY date(snapshot_time)
+                ORDER BY trade_date ASC
+            """
+            rows = conn.execute(sql, params).fetchall()
+            self._close(conn)
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
 
     def get_latest_market_snapshot(self, code: str) -> Optional[Dict]:
         """获取某只股票的最新行情快照"""

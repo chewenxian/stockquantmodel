@@ -682,10 +682,66 @@ comparison = analyzer.compare_stocks_impact()
 
 ---
 
+
+## 十一、回测模块说明（v5.0）
+
+### `analyzer/backtest.py` — 策略回测引擎
+
+| 方法 | 功能 |
+|------|------|
+| `record_signal(code, date, suggestion, confidence, sentiment)` | 记录AI分析建议到回测信号表 |
+| `record_today_signals()` | 从当天 analysis 表批量记录信号 |
+| `run_backtest(code, start_date, end_date)` | 单只股票回测，返回绩效指标 |
+| `run_all_backtest()` | 全量股票回测 |
+| `get_performance_summary()` | 绩效汇总 |
+| `compare_with_benchmark(code)` | 与沪深300对比 |
+
+**回测规则：**
+- 建议=买入/强烈买入 → 开仓
+- 建议=卖出/强烈卖出 → 平仓
+- 建议=持有/观望 → 维持
+- 交易成本：单边万分之三
+- 持仓比例：基于信号强度和置信度
+
+**绩效指标：** 总收益率 / 年化收益率 / 最大回撤 / 胜率 / 夏普比率 / 阿尔法
+
+### `dashboard/app.py` — Streamlit 可视化看板
+
+四页面应用：
+
+| 页面 | 功能 |
+|------|------|
+| 市场总览 | 情绪仪表盘、数据源分布饼图、热点新闻、自选股影响一览 |
+| 个股深度分析 | K线(均线/布林带)、情绪趋势图、AI报告、推理链 |
+| 回测报告 | 收益曲线、绩效卡片、逐笔交易、基准对比 |
+| 系统管理 | 数据库统计、数据源状态、手动触发采集/分析 |
+
+**启动：**
+```bash
+cd stockquantmodel
+streamlit run dashboard/app.py
+```
+
+**依赖：** `pip install streamlit plotly pandas`
+
+### 数据库升级 `storage/database.py` (v5.0)
+
+**新增表：**
+- `backtest_signals` — 回测信号记录（stock_code, signal_date, suggestion, ...）
+- `backtest_results` — 回测结果存储（total_return, sharpe_ratio, ...）
+
+**新增方法：**
+- `record_backtest_signal()` / `get_backtest_signals()` / `get_all_backtest_signals()`
+- `save_backtest_result()` / `get_backtest_results()`
+- `get_price_history()` — 按日聚合行情数据
+
+---
+
 ## 项目状态
 
 ✅ 采集模块已完成（多数据源全面采集）
 ✅ 数据处理层已完成（清洗/去重/提取/管道编排）v2.0
 ✅ 分析模块已完成（NLP分析/情绪分析/交易建议/日报生成）v3.0
 ✅ AI 分析增强层已完成（NER/知识图谱/影响评估/推理链）v4.0
+✅ 回测模块已完成（回测引擎 + Streamlit可视化看板）v5.0
 ⏳ 推送模块（待开发）
