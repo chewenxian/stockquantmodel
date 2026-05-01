@@ -1,0 +1,79 @@
+"""
+采集基类：所有爬虫的公共基础设施
+"""
+import time
+import logging
+import random
+from typing import Optional, Dict, Any
+from datetime import datetime
+import requests
+from requests.adapters import HTTPAdapter, Retry
+
+
+logger = logging.getLogger(__name__)
+
+
+class BaseCollector:
+    """所有数据源采集器的基类"""
+
+    def __init__(self, proxy: Optional[Dict[str, str]] = None):
+        self.session = self._create_session(proxy)
+        self.headers = {
+            "User-Agent": self._random_ua(),
+            "Accept": "text/html,application/json,*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://finance.sina.com.cn/",
+        }
+
+    def _create_session(self, proxy: Optional[Dict[str, str]] = None) -> requests.Session:
+        session = requests.Session()
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        adapter = HTTPAdapter(max_retries=retries)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        if proxy:
+            session.proxies.update(proxy)
+        session.timeout = 15
+        return session
+
+    def _random_ua(self) -> str:
+        agents = [
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+        ]
+        return random.choice(agents)
+
+    def get(self, url: str, params: dict = None, **kwargs) -> Optional[requests.Response]:
+        """带重试和延迟的安全 GET 请求"""
+        for attempt in range(3):
+            try:
+                time.sleep(random.uniform(0.3, 1.0))  # 请求间隔，防封
+                resp = self.session.get(
+                    url, params=params,
+                    headers={**self.headers, **kwargs.pop("headers", {})},
+                    **kwargs
+                )
+                resp.raise_for_status()
+                return resp
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"[{self.__class__.__name__}] GET {url} 失败 (尝试 {attempt+1}/3): {e}")
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+        return None
+
+    def get_json(self, url: str, params: dict = None, **kwargs) -> Optional[dict]:
+        resp = self.get(url, params, **kwargs)
+        if resp:
+            try:
+                return resp.json()
+            except Exception as e:
+                logger.warning(f"[{self.__class__.__name__}] JSON解析失败: {e}")
+        return None
+
+    def safe_text(self, resp: Optional[requests.Response]) -> str:
+        return resp.text if resp else ""
+
+    def collect(self) -> int:
+        """子类实现：执行一次采集，返回采集数量"""
+        raise NotImplementedError

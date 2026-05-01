@@ -1,0 +1,57 @@
+# ============================================
+# 股票情报系统配置
+# ============================================
+
+# 系统设置
+system:
+  data_dir: "data"
+  db_path: "data/stock_news.db"
+  log_dir: "logs"
+
+# 自选股列表文件
+stocks_file: "stocks.csv"
+
+# 数据采集
+collector:
+  # 采集频率（分钟）
+  intervals:
+    news: 30          # 财经新闻
+    announcement: 60  # 公司公告
+    market: 15        # 行情数据
+    money_flow: 30    # 资金流向
+    dragon_tiger: 60  # 龙虎榜
+    macro: 120        # 宏观经济
+    policy: 60        # 政策新闻
+    sentiment: 60     # 社交媒体情绪
+    research: 120     # 机构研报
+    global_market: 60 # 国际市场
+
+  # 数据源开关
+  sources:
+    eastmoney: true       # 东方财富（新闻+行情+资金+龙虎榜）
+    sina: true            # 新浪财经（新闻+行情）
+    xueqiu: true          # 雪球（新闻+情绪）
+    cninfo: true          # 巨潮资讯（公司公告）
+    cls: true             # 财联社（电报快讯）
+    wallstreet: true      # 华尔街见闻
+    tencent: true         # 腾讯证券
+    national_stat: true   # 国家统计局（宏观数据）
+    sse: true             # 上交所公告
+
+# 分析模块
+analyzer:
+  provider: "deepseek"    # deepseek / openai
+  model: "deepseek-chat"
+  api_base: "https://api.deepseek.com"
+  # API key 从环境变量读取 DEEPSEEK_API_KEY
+  schedule: "0 16 * * 1-5"  # 交易日16:00
+
+# 推送
+notify:
+  wechat: true           # 通过 OpenClaw 微信推送
+  schedule: "30 16 * * 1-5"  # 交易日16:30推送日报
+
+# 代理（国内访问 GitHub 需要）
+proxy:
+  http: "http://127.0.0.1:7897"
+  https: "http://127.0.0.1:7897"

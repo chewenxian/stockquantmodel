@@ -114,10 +114,13 @@ CREATE TABLE analysis (
 ## 四、模块划分
 
 ### 1️⃣ 采集模块 `collector/`
-- `spiders/eastmoney.py` — 东方财富新闻
-- `spiders/sina.py` — 新浪财经
-- `spiders/xueqiu.py` — 雪球
-- `scheduler.py` — 定时调度入口
+- `scheduler.py` — 定时调度入口，管理所有采集器
+- `base.py` — 采集基类（请求重试、代理、UA轮换）
+- `spiders/eastmoney.py` — 东方财富（新闻/行情/资金流向/龙虎榜/板块）
+- `spiders/sina_finance.py` — 新浪财经（行情/新闻/美股）
+- `spiders/xueqiu.py` — 雪球（热榜/讨论/情绪）
+- `spiders/cninfo.py` — 巨潮资讯网（公司公告）
+- `spiders/policy_collector.py` — 财联社/华尔街见闻（政策快讯）
 
 ### 2️⃣ 存储模块 `storage/`
 - `database.py` — SQLite 建表+CRUD
@@ -194,39 +197,47 @@ stockquantmodel/
 │   └── stock_news.db      ← SQLite 数据库
 ├── collector/
 │   ├── __init__.py
-│   ├── scheduler.py
-│   ├── base.py
+│   ├── scheduler.py       ← 调度器
+│   ├── base.py             ← 采集基类
 │   └── spiders/
 │       ├── __init__.py
-│       ├── eastmoney.py
-│       ├── sina.py
-│       └── xueqiu.py
+│       ├── eastmoney.py    ← 东方财富(新闻/行情/资金/龙虎榜)
+│       ├── sina_finance.py ← 新浪财经(行情/新闻/美股)
+│       ├── xueqiu.py       ← 雪球(热榜/讨论/情绪)
+│       ├── cninfo.py       ← 巨潮资讯(公司公告)
+│       └── policy_collector.py ← 财联社/华尔街(政策快讯)
 ├── storage/
 │   ├── __init__.py
-│   ├── database.py
-│   └── models.py
+│   └── database.py         ← SQLite 12表
 ├── analyzer/
-│   ├── __init__.py
-│   ├── nlp_analyzer.py
-│   ├── sentiment.py
-│   └── advisor.py
+│   └── __init__.py
 └── output/
-    ├── __init__.py
-    ├── report.py
-    └── notifier.py
+    └── __init__.py
 ```
 
 ---
 
-## 八、后续可扩展
+## 数据源全景图
 
-- [ ] Web 界面展示（Flask/Streamlit）
-- [ ] 接入更多数据源（公告/研报/龙虎榜）
-- [ ] K线技术指标结合
-- [ ] 历史回测
-- [ ] 多账户推送
+| 数据维度 | 来源 | 采集内容 | 影响股价逻辑 |
+|---------|------|---------|-------------|
+| 📰 财经新闻 | 东方财富、新浪 | 个股/板块/宏观新闻 | 新闻情绪影响短期波动 |
+| 📢 公司公告 | 巨潮资讯网 | 业绩预告/分红/重组/减持 | 公告是股价直接催化剂 |
+| 📊 实时行情 | 东方财富、新浪 | 价格/涨跌幅/成交量/换手率 | 技术面分析基础 |
+| 💰 资金流向 | 东方财富 | 主力净流入/散户/大单 | 主力资金预示方向 |
+| 🐉 龙虎榜 | 东方财富 | 涨停分析/游资动向 | 游资偏好反映热点 |
+| 📋 板块排行 | 东方财富 | 行业板块涨跌/领涨股 | 板块效应联动个股 |
+| 💬 社交媒体 | 雪球 | 个股讨论/热榜/情绪 | 散户情绪是反向指标 |
+| 🏛️ 政策快讯 | 财联社/华尔街 | 宏观/行业政策/监管 | 政策改变行业预期 |
+| 📈 宏观数据 | 国家统计局 | CPI/PPI/PMI/GDP (待接入) | 宏观定方向 |
+| 💹 国际市场 | 新浪 | 美股三大指数 | 外盘情绪影响A股 |
 
 ---
 
-> **项目状态** 📌 方案设计阶段
-> **开始开发**？跟我说一声，从采集模块开始写！
+## 项目状态
+
+✅ 采集模块已完成（多数据源全面采集）
+⏳ 分析模块（待开发）
+⏳ 推送模块（待开发）
+
+> 下一步：开始开发 DeepSeek API 智能分析模块？
