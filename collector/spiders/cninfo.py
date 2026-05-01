@@ -1,11 +1,13 @@
 """
 巨潮资讯网：公司公告（影响股价的官方信息）
-- 业绩预告
-- 分红送转
-- 重大合同
-- 资产重组
-- 股东增减持
-- 监管问询
+数据源：http://www.cninfo.com.cn
+
+API说明（2026年验证）：
+- 公告查询API：http://www.cninfo.com.cn/new/hisAnnouncement/query
+- 必须使用 JSON POST (Content-Type: application/json)
+- 使用 form-data POST 会返回 0 条结果
+- stock 参数格式：code,name（如 "000001,平安银行"）
+- 需要正确的 Referer + X-Requested-With 头
 """
 import json
 import logging
@@ -26,41 +28,55 @@ class CninfoCollector(BaseCollector):
     def __init__(self, db, proxy=None):
         super().__init__(proxy)
         self.db = db
-        self.search_url = "http://www.cninfo.com.cn/new/disclosure/stock"
+        self.search_url = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
 
     def collect(self) -> Dict[str, int]:
-        results = {}
+        results = {"error": 0}
         stocks = self.db.load_stocks()
-        results["announcements"] = self._collect_announcements(stocks)
+        try:
+            results["announcements"] = self._collect_announcements(stocks)
+        except Exception as e:
+            logger.error(f"[巨潮] 公告采集异常: {e}")
+            results["announcements"] = 0
         total = sum(results.values())
         logger.info(f"[巨潮] 采集完成: {results}, 总计 {total} 条")
         return results
 
     def _collect_announcements(self, stocks: List[Dict]) -> int:
-        """采集公司公告"""
+        """采集公司公告 - 使用 JSON POST（已验证可用）"""
         count = 0
         today = datetime.now().strftime("%Y-%m-%d")
         week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
+        headers = {
+            "Content-Type": "application/json",
+            "Referer": "http://www.cninfo.com.cn/new/disclosure/stock",
+            "User-Agent": self._random_ua(),
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": "http://www.cninfo.com.cn",
+        }
+
+        # 先访问首页获取必要cookie
+        self.get("http://www.cninfo.com.cn/new/disclosure/stock", headers=headers)
+
         for stock in stocks:
             try:
                 code = stock["code"]
-                url = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
-                headers = {
-                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    "Referer": "http://www.cninfo.com.cn/new/disclosure/stock",
-                    "User-Agent": self._random_ua(),
-                }
-                data = {
+                name = stock["name"]
+                plate = self._get_plate(code)
+
+                # 使用 JSON POST - 关键！form-data POST 会返回0条
+                payload = {
                     "pageNum": 1,
                     "pageSize": 20,
-                    "column": "szse_main",
+                    "column": "szse",
                     "tabName": "fulltext",
-                    "plate": self._get_plate(code),
-                    "stock": f"{code},{stock['name']}",
+                    "plate": plate,
+                    "stock": f"{code},{name}",
                     "searchkey": "",
                     "secid": "",
-                    "category": "",
+                    "category": "category_ndbg_szsh;category_bndbg_szsh;category_yjdbg_szsh;category_dxrl_szsh;category_rz_szsh;category_bpszc_szsh",
                     "trade": "",
                     "seDate": f"{week_ago}~{today}",
                     "sortName": "",
@@ -68,7 +84,9 @@ class CninfoCollector(BaseCollector):
                     "isHLtitle": True,
                 }
 
-                resp = self.session.post(url, data=data, headers=headers, timeout=15)
+                resp = self.session.post(
+                    self.search_url, json=payload, headers=headers, timeout=15
+                )
                 if resp.status_code != 200:
                     continue
 
@@ -82,6 +100,7 @@ class CninfoCollector(BaseCollector):
                         ann_id = ann.get("announcementId", "")
                         ann_type = ann.get("announcementTypeName", "")
                         pub_date = ann.get("announcementDate", "")
+                        sec_code = ann.get("secCode", code)
 
                         # 重大公告分类关键词
                         important_keywords = [
@@ -98,7 +117,7 @@ class CninfoCollector(BaseCollector):
                         full_url = f"http://www.cninfo.com.cn/new/disclosure/detail?announcementId={ann_id}"
 
                         self.db.insert_announcement(
-                            code=code, title=title, url=full_url,
+                            code=sec_code, title=title, url=full_url,
                             announce_type=ann_type,
                             summary=f"{'【重要】' if is_important else ''}{summary[:200]}",
                             publish_date=pub_date
@@ -117,7 +136,8 @@ class CninfoCollector(BaseCollector):
                     except:
                         pass
             except Exception as e:
-                logger.warning(f"巨潮公告采集异常({stock['code']}): {e}")
+                logger.warning(f"[巨潮] 公告采集异常({stock['code']}): {e}")
+
         return count
 
     def _get_plate(self, code: str) -> str:
