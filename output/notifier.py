@@ -5,6 +5,8 @@
 支持通道：
 - 微信（OpenClaw 微信通道 → print 输出，由 OpenClaw 转发）
 - Telegram Bot
+- QQ（go-cqhttp OneBot API）
+- 飞书机器人 Webhook
 - 企业微信机器人 Webhook
 - 钉钉机器人 Webhook
 
@@ -26,12 +28,139 @@ logger = logging.getLogger(__name__)
 
 class Notifier:
     """
-    多渠道推送：微信/Telegram/钉钉
+    多渠道推送：微信/Telegram/QQ/飞书/钉钉
     """
 
     # ══════════════════════════════════════════
     # 微信通道（OpenClaw 转发）
     # ══════════════════════════════════════════
+
+    # ══════════════════════════════════════════
+    # QQ 通道（go-cqhttp OneBot API）
+    # ══════════════════════════════════════════
+
+    @staticmethod
+    def push_qq(markdown_text: str, qq_api_url: str = None,
+                 qq_target: str = None, qq_target_type: str = "group") -> bool:
+        """
+        推送到 QQ（通过 go-cqhttp OneBot v11 HTTP API）
+
+        Args:
+            markdown_text: 消息文本
+            qq_api_url: go-cqhttp HTTP 地址，默认从环境变量 QQ_API_URL（如 http://127.0.0.1:5700）
+            qq_target: 目标群号或QQ号，默认从环境变量 QQ_TARGET
+            qq_target_type: group（群）或 private（私聊）
+
+        Returns:
+            bool: 是否成功
+        """
+        api_url = qq_api_url or os.environ.get("QQ_API_URL", "")
+        target = qq_target or os.environ.get("QQ_TARGET", "")
+
+        if not api_url or not target:
+            logger.warning("QQ 未配置（缺少 QQ_API_URL 或 QQ_TARGET）")
+            return False
+
+        try:
+            import requests
+            # 消息分段处理（QQ 消息有长度限制）
+            max_len = 4000
+            if len(markdown_text) > max_len:
+                segments = [markdown_text[i:i+max_len] for i in range(0, len(markdown_text), max_len)]
+            else:
+                segments = [markdown_text]
+
+            success = True
+            for seg in segments:
+                # 简化 markdown 为纯文本（go-cqhttp 不支持完整 markdown）
+                # 保留粗体和基本符号
+                clean_text = seg.replace("**", "").replace("#", "").replace("*", "·")
+                payload = {
+                    "message_type": qq_target_type,
+                    "message": clean_text[:4096],
+                }
+                if qq_target_type == "group":
+                    payload["group_id"] = int(target)
+                else:
+                    payload["user_id"] = int(target)
+
+                resp = requests.post(
+                    f"{api_url.rstrip('/')}/send_msg",
+                    json=payload, timeout=5
+                )
+                if resp.status_code != 200:
+                    logger.error(f"QQ 推送失败: {resp.status_code} {resp.text[:200]}")
+                    success = False
+                else:
+                    ret = resp.json()
+                    if ret.get("status") != "ok":
+                        logger.warning(f"QQ 推送返回异常: {ret}")
+                        success = False
+
+            if success:
+                logger.info(f"QQ 推送成功 ({len(segments)} 段, {qq_target_type}:{target})")
+            return success
+
+        except Exception as e:
+            logger.error(f"QQ 推送异常: {e}")
+            return False
+
+    # ══════════════════════════════════════════
+    # 飞书机器人 Webhook
+    # ══════════════════════════════════════════
+
+    @staticmethod
+    def push_feishu(markdown_text: str, webhook_url: str = None) -> bool:
+        """
+        推送到飞书群机器人 Webhook
+
+        Args:
+            markdown_text: Markdown 格式消息
+            webhook_url: Webhook URL，默认从环境变量 FEISHU_WEBHOOK 读取
+
+        Returns:
+            bool: 是否成功
+        """
+        webhook_url = webhook_url or os.environ.get("FEISHU_WEBHOOK", "")
+
+        if not webhook_url:
+            logger.warning("飞书未配置（缺少 FEISHU_WEBHOOK）")
+            return False
+
+        try:
+            import requests
+            payload = {
+                "msg_type": "interactive",
+                "card": {
+                    "header": {
+                        "title": {"tag": "plain_text", "content": "📡 股票量化情报"},
+                        "template": "blue",
+                    },
+                    "elements": [
+                        {"tag": "markdown", "content": markdown_text},
+                        {"tag": "hr"},
+                        {
+                            "tag": "note",
+                            "elements": [{
+                                "tag": "plain_text",
+                                "content": f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            }]
+                        }
+                    ]
+                }
+            }
+            resp = requests.post(webhook_url, json=payload, timeout=10)
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get("code") == 0:
+                    logger.info("飞书推送成功")
+                    return True
+            logger.error(f"飞书推送失败: {resp.status_code} {resp.text[:200]}")
+            return False
+
+        except Exception as e:
+            logger.error(f"飞书推送异常: {e}")
+            return False
 
     @staticmethod
     def push_wechat(markdown_text: str) -> bool:
@@ -199,7 +328,7 @@ class Notifier:
         Args:
             report_text: 报告 Markdown 文本
             channels: 通道列表，默认 ["wechat"]
-                      可选: wechat, telegram, wechat_work, dingtalk
+                      可选: wechat, telegram, qq, feishu, wechat_work, dingtalk
 
         Returns:
             {channel_name: success_bool}
@@ -214,6 +343,10 @@ class Notifier:
                 results["wechat"] = Notifier.push_wechat(report_text)
             elif channel == "telegram":
                 results["telegram"] = Notifier.push_telegram(report_text)
+            elif channel == "qq":
+                results["qq"] = Notifier.push_qq(report_text)
+            elif channel == "feishu":
+                results["feishu"] = Notifier.push_feishu(report_text)
             elif channel == "wechat_work":
                 results["wechat_work"] = Notifier.push_wechat_work(report_text)
             elif channel == "dingtalk":

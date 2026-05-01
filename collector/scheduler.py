@@ -28,6 +28,7 @@ from collector.spiders.guba_sentiment import GubaSentimentCollector
 from collector.spiders.bond_yield import BondYieldCollector
 from collector.spiders.stock_hot import StockHotCollector
 from collector.fallback import FallbackChain
+from output.realtime_pusher import RealtimePusher
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class CollectScheduler:
         sources = self.config.get("collector", {}).get("sources", {})
         self.collectors = {}
         self.fallback = FallbackChain(self)
+        self.realtime_pusher = RealtimePusher(db=self.db)
 
         if sources.get("eastmoney", True):
             self.collectors["东方财富"] = EastMoneyCollector(self.db, proxy)
@@ -133,6 +135,31 @@ class CollectScheduler:
 
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info(f"===== 全量采集完成, 耗时 {elapsed:.1f}s =====")
+        return results
+
+    def collect_with_push(self, use_fallback: bool = True) -> Dict[str, int]:
+        """
+        采集 + 实时推送：采集完成后自动推送重要事件
+
+        Args:
+            use_fallback: 是否启用降级链
+
+        Returns:
+            采集结果
+        """
+        if use_fallback:
+            results = self.collect_with_fallback()
+        else:
+            results = self.collect_all()
+
+        # 采集完成后检查新数据，推送重要事件
+        try:
+            pushed = self.realtime_pusher.process_new_items()
+            if pushed > 0:
+                logger.info(f"[实时推送] 本次采集触发 {pushed} 条事件推送")
+        except Exception as e:
+            logger.warning(f"[实时推送] 执行失败: {e}")
+
         return results
 
     def collect_with_fallback(self) -> Dict[str, int]:

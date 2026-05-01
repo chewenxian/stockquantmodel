@@ -355,6 +355,22 @@ def cmd_health():
     print()
 
 
+def cmd_watch():
+    """实时监控模式（30秒轮询，重大事件秒级推送）"""
+    from output.realtime_pusher import RealtimePusher
+
+    interval = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 30
+
+    print(f"🚨 启动实时事件监控")
+    print(f"   轮询间隔: {interval} 秒")
+    print(f"   推送通道: QQ + 飞书")
+    print(f"   S/A 级事件自动秒推")
+    print()
+
+    pusher = RealtimePusher()
+    pusher.run_watch_loop(interval)
+
+
 def cmd_verify():
     """
     交叉验证新闻可信度
@@ -558,6 +574,7 @@ if __name__ == "__main__":
         "history": cmd_history,
         "verify": cmd_verify,
         "health": cmd_health,
+        "watch": cmd_watch,
     }
 
     if command in commands:
