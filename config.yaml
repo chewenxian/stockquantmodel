@@ -38,6 +38,11 @@ collector:
     jin10: true           # 金十数据（快讯）
     national_stat: true   # 国家统计局（宏观数据）
     sse: true             # 上交所公告
+    szse: true            # 深交所公告
+    bse: true             # 北交所公告
+    stcn: true            # 证券时报
+    10jqka: true          # 同花顺7x24快讯
+    gov_policy: true      # 央行/发改委/工信部政策
 
 # 分析模块
 analyzer:

@@ -15,6 +15,12 @@ from collector.spiders.xueqiu import XueqiuCollector
 from collector.spiders.cninfo import CninfoCollector
 from collector.spiders.policy_collector import PolicyCollector
 from collector.spiders.jin10 import Jin10Collector
+from collector.spiders.sse import SSECollector
+from collector.spiders.szse import SZSECollector
+from collector.spiders.bse import BSECollector
+from collector.spiders.stcn import STCNCollector
+from collector.spiders.hexin import HexinCollector
+from collector.spiders.gov_policy import GovPolicyCollector
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +63,24 @@ class CollectScheduler:
 
         if sources.get("jin10", True):
             self.collectors["金十数据"] = Jin10Collector(self.db, proxy)
+
+        if sources.get("sse", True):
+            self.collectors["上交所公告"] = SSECollector(self.db, proxy)
+
+        if sources.get("szse", True):
+            self.collectors["深交所公告"] = SZSECollector(self.db, proxy)
+
+        if sources.get("bse", True):
+            self.collectors["北交所公告"] = BSECollector(self.db, proxy)
+
+        if sources.get("stcn", True):
+            self.collectors["证券时报"] = STCNCollector(self.db, proxy)
+
+        if sources.get("10jqka", True):
+            self.collectors["同花顺快讯"] = HexinCollector(self.db, proxy)
+
+        if sources.get("gov_policy", True):
+            self.collectors["政府政策"] = GovPolicyCollector(self.db, proxy)
 
         logger.info(f"采集器初始化完成: {list(self.collectors.keys())}")
 
