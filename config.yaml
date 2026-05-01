@@ -15,16 +15,13 @@ stocks_file: "stocks.csv"
 collector:
   # 采集频率（分钟）
   intervals:
-    news: 30          # 财经新闻
+    quick: 10         # 快速采集（新闻+行情）
+    news: 15          # 财经新闻
+    market: 5         # 行情数据（每次全部自选股）
+    money_flow: 15    # 资金流向
+    policy: 30        # 政策新闻
     announcement: 60  # 公司公告
-    market: 15        # 行情数据
-    money_flow: 30    # 资金流向
-    dragon_tiger: 60  # 龙虎榜
-    macro: 120        # 宏观经济
-    policy: 60        # 政策新闻
     sentiment: 60     # 社交媒体情绪
-    research: 120     # 机构研报
-    global_market: 60 # 国际市场
 
   # 数据源开关
   sources:
