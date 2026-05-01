@@ -29,8 +29,18 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 # 全局标准化参数（可被外部调整）
-ZSCOER_GLOBAL_MEAN: Dict[str, float] = {}
-ZSCOER_GLOBAL_STD: Dict[str, float] = {}
+ZSCORE_GLOBAL_MEAN: Dict[str, float] = {
+    "momentum_1m": 0.0, "momentum_3m": 0.0, "momentum_6m": 0.0,
+    "reverse_5d": 0.0, "volatility_20d": 0.30, "max_drawdown_60d": -0.15,
+    "skewness_20d": 0.0, "pe_factor": 25.0, "pb_factor": 3.0,
+    "turnover_factor": 3.0, "sentiment_factor": 0.0,
+}
+ZSCORE_GLOBAL_STD: Dict[str, float] = {
+    "momentum_1m": 0.08, "momentum_3m": 0.15, "momentum_6m": 0.25,
+    "reverse_5d": 0.04, "volatility_20d": 0.10, "max_drawdown_60d": 0.08,
+    "skewness_20d": 0.5, "pe_factor": 15.0, "pb_factor": 2.0,
+    "turnover_factor": 2.5, "sentiment_factor": 0.3,
+}
 
 
 class FactorLibrary:

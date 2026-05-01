@@ -13,6 +13,7 @@ import os
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, date
 from typing import List, Optional, Dict as DictType
 from collections import defaultdict
@@ -25,10 +26,29 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI 生命周期管理：启动时初始化全局依赖"""
+    from storage.database import Database
+    from analyzer.stock_analyzer import StockAnalyzer
+    from analyzer.report_generator import ReportGenerator
+
+    global _db, _analyzer, _report_gen
+    _db = Database("data/stock_news.db")
+    _analyzer = StockAnalyzer()
+    _report_gen = ReportGenerator()
+    logger.info("全局依赖初始化完成 (Database / StockAnalyzer / ReportGenerator)")
+    yield
+    # 可在此添加关闭清理逻辑
+    logger.info("全局依赖关闭")
+
+
 app = FastAPI(
     title="股票量化分析系统 API",
     description="股票新闻情报收集分析系统的 RESTful 接口",
     version="6.0.0",
+    lifespan=lifespan,
 )
 
 # CORS 配置
@@ -107,26 +127,14 @@ _report_gen = None
 
 
 def _get_db():
-    global _db
-    if _db is None:
-        from storage.database import Database
-        _db = Database("data/stock_news.db")
     return _db
 
 
 def _get_analyzer():
-    global _analyzer
-    if _analyzer is None:
-        from analyzer.stock_analyzer import StockAnalyzer
-        _analyzer = StockAnalyzer()
     return _analyzer
 
 
 def _get_report_gen():
-    global _report_gen
-    if _report_gen is None:
-        from analyzer.report_generator import ReportGenerator
-        _report_gen = ReportGenerator()
     return _report_gen
 
 

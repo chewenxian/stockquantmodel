@@ -11,6 +11,7 @@
 import logging
 import json
 import math
+from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -290,7 +291,7 @@ class TradingAdvisor:
             "news_count": news_count,
             "impact_evaluation": impact_evaluation,
             "kg_reasoning": kg_reasoning,
-            "timestamp": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
 
         return result
@@ -446,7 +447,7 @@ class TradingAdvisor:
                     "news_count": 0,
                     "impact_evaluation": {},
                     "kg_reasoning": {},
-                    "timestamp": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 })
         return advices
 

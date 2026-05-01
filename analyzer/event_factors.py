@@ -161,7 +161,7 @@ class EventFactorEngine:
                             "matched_keyword": keyword,
                             "publish_date": ann.get("publish_date", ""),
                         })
-                        break  # 一个公告只匹配一种事件（第一个命中）
+                        # 不 break，允许同一条公告匹配多个事件类型
 
         return events
 

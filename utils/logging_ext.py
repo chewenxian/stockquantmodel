@@ -37,10 +37,14 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info and record.exc_info[0]:
             log_entry["exception"] = self.formatException(record.exc_info)
 
-        # 如果有 extra 字段，附加
-        for key in ("source", "count", "code", "duration", "status"):
-            if hasattr(record, key):
-                log_entry[key] = getattr(record, key)
+        # 动态收集所有非标准 extra 字段
+        standard_fields = {'name', 'msg', 'args', 'levelname', 'levelno', 'pathname',
+            'filename', 'module', 'exc_info', 'exc_text', 'stack_info', 'lineno',
+            'funcName', 'created', 'msecs', 'relativeCreated', 'thread', 'threadName',
+            'process', 'processName', 'message', 'asctime'}
+        for key, value in record.__dict__.items():
+            if key not in standard_fields and not key.startswith('_'):
+                log_entry[key] = value
 
         return json.dumps(log_entry, ensure_ascii=False)
 

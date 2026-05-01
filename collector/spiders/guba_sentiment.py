@@ -115,11 +115,12 @@ class GubaSentimentCollector(BaseCollector):
             # 综合帖子数
             post_count = max(total_hits, total_bars)
 
-            # 看涨/看跌比例 - 从股吧首页list页面获取更多信息
-            bullish_ratio = 0.0
-            bearish_ratio = 0.0
+            # 看涨/看跌比例 - 从 API 返回的 bullPercent/bearPercent 字段获取
+            bullish_ratio = float(raw_data.get("bullPercent", 0) or 0)
+            bearish_ratio = float(raw_data.get("bearPercent", 0) or 0)
 
             # 计算情绪得分: 正值=看涨，负值=看跌
+            sentiment_score = round(bullish_ratio - bearish_ratio, 1)
             today = datetime.now().strftime("%Y-%m-%d")
 
             conn = self.db._connect()
@@ -135,7 +136,7 @@ class GubaSentimentCollector(BaseCollector):
                         bullish_ratio, bearish_ratio, sentiment_score, trade_date
                     ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                 """, (code, name, post_count, total_read,
-                      bullish_ratio, bearish_ratio, 0.0, today))
+                      bullish_ratio, bearish_ratio, sentiment_score, today))
                 conn.commit()
                 conn.close()
                 return 1

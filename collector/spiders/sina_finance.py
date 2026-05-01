@@ -138,7 +138,7 @@ class SinaFinanceCollector(BaseCollector):
         return count
 
     def _collect_us_market(self) -> int:
-        """采集美股主要指数"""
+        """采集美股主要指数并入库"""
         count = 0
         # 美股三大指数
         us_codes = [".DJI", ".IXIC", ".INX"]
@@ -146,7 +146,46 @@ class SinaFinanceCollector(BaseCollector):
         headers = {"Referer": "https://finance.sina.com.cn"}
 
         resp = self.get(url, headers=headers)
-        if resp:
-            logger.info(f"[新浪-美股] 采集到行情数据 ({len(resp.text)} bytes)")
-            count = 1
+        if not resp:
+            return count
+
+        text = resp.text
+        logger.info(f"[新浪-美股] 采集到行情数据 ({len(text)} bytes)")
+
+        for line in text.strip().split("\n"):
+            try:
+                # 格式: var hq_str_dji="名称,开盘价,昨收,当前价,最高,最低,..."
+                match = re.search(r'hq_str_(\w+)="(.+)"', line)
+                if not match:
+                    continue
+                code = match.group(1)
+                parts = match.group(2).split(",")
+                if len(parts) < 10:
+                    continue
+
+                fields = {
+                    "name": parts[0],
+                    "open": float(parts[1]) if parts[1] else 0,
+                    "close": float(parts[2]) if parts[2] else 0,  # 昨收
+                    "price": float(parts[3]) if parts[3] else 0,
+                    "high": float(parts[4]) if parts[4] else 0,
+                    "low": float(parts[5]) if parts[5] else 0,
+                }
+
+                # 计算涨跌幅
+                change_pct = 0
+                if fields["close"] > 0:
+                    change_pct = (fields["price"] - fields["close"]) / fields["close"] * 100
+
+                self.db.insert_market_snapshot(
+                    code=code.upper(), price=fields["price"],
+                    change_pct=round(change_pct, 2),
+                    volume=0, amount=0,
+                    high=fields["high"], low=fields["low"],
+                    open=fields["open"]
+                )
+                count += 1
+            except Exception as e:
+                logger.warning(f"美股行情解析异常 ({line[:80]}): {e}")
+
         return count

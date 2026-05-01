@@ -75,10 +75,10 @@ class RealtimePusher:
         try:
             conn = self.db._connect()
             row = conn.execute("SELECT MAX(id) as max_id FROM news").fetchone()
-            if row and row["max_id"]:
+            if row and row["max_id"] is not None:
                 self._last_news_id = row["max_id"]
             row = conn.execute("SELECT MAX(id) as max_id FROM announcements").fetchone()
-            if row and row["max_id"]:
+            if row and row["max_id"] is not None:
                 self._last_announcement_id = row["max_id"]
             self.db._close(conn)
         except Exception:
