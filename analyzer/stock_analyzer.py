@@ -131,7 +131,33 @@ class StockAnalyzer:
         return []
 
     def _get_market_data(self, code: str) -> Optional[Dict]:
-        """获取某只股票的最新行情"""
+        """获取某只股票的最新行情（优先实时API）"""
+        try:
+            from collector.spiders.eastmoney import EastMoneyCollector
+            temp_c = EastMoneyCollector(None)
+            prefix = "1." if code.startswith("6") else "0."
+            data = temp_c.get_json(
+                "https://push2.eastmoney.com/api/qt/ulist.np/get",
+                {"secids": prefix + code, "fields": "f2,f3,f4,f5,f6,f7,f15,f16,f17,f18,f20,f21,f57", "fltt": 2, "invt": 2}
+            )
+            if data and data.get("data") and data["data"].get("diff"):
+                d = data["data"]["diff"][0]
+                return {
+                    "price": d.get("f2", 0) or 0,
+                    "change_pct": d.get("f3", 0) or 0,
+                    "volume": d.get("f4", 0) or 0,
+                    "amount": d.get("f5", 0) or 0,
+                    "high": d.get("f15", 0) or 0,
+                    "low": d.get("f16", 0) or 0,
+                    "open": d.get("f17", 0) or 0,
+                    "turnover_rate": d.get("f20", 0) or 0,
+                    "pe": d.get("f21", 0) or 0,
+                    "source": "realtime"
+                }
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"实时行情API失败: {e}")
+
         if not self.db:
             return None
         try:
