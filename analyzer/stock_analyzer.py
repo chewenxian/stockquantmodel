@@ -222,16 +222,17 @@ class StockAnalyzer:
 
     def _fetch_iwencai_for_stock(self, code: str, name: str) -> Dict:
         """
-        分析个股时按需调用问财 API，获取该股票的最新新闻和公告
-        不写入数据库，直接返回给分析流程使用
-
-        Args:
-            code: 股票代码
-            name: 股票名称
-
-        Returns:
-            {"news": [...], "announcements": [...]}
+        分析个股时按需调用问财 API，带5分钟缓存
         """
+        # 缓存检查
+        if not hasattr(self, '_iwencai_cache'):
+            self._iwencai_cache = {}
+        cache_key = f"{code}:{name}"
+        if cache_key in self._iwencai_cache:
+            cached = self._iwencai_cache[cache_key]
+            if (datetime.now() - cached["time"]).total_seconds() < 300:  # 5分钟
+                return cached["data"]
+
         import os
         import secrets
         import json
@@ -284,6 +285,9 @@ class StockAnalyzer:
         if result["news"] or result["announcements"]:
             logger.info(f"[问财] {name}({code}): 获取到 {len(result['news'])} 条新闻, "
                        f"{len(result['announcements'])} 条公告")
+
+        # 写入缓存
+        self._iwencai_cache[cache_key] = {"data": result, "time": datetime.now()}
 
         return result
 

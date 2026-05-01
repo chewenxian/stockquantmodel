@@ -601,9 +601,11 @@ class SignalGrader:
                     avg_change = sum(r["change_pct"] for r in board_rows) / len(board_rows)
                     heat = (avg_change + 5) / 10
                     return max(0.0, min(1.0, heat))
-            conn.close()
         except Exception as e:
             logger.warning(f"查询板块热度失败 ({stock_code}): {e}")
+        finally:
+            try: conn.close()
+            except: pass
         return 0.5
 
     # ──────────────────────────────────────────

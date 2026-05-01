@@ -535,8 +535,6 @@ def cmd_history():
 def cmd_schedule():
     """定时采集模式"""
     import schedule as sch
-    """定时采集模式"""
-    import schedule as sch
     from collector.scheduler import CollectScheduler
 
     scheduler = CollectScheduler()
