@@ -956,6 +956,130 @@ streamlit run dashboard/app.py
 
 ---
 
+---
+
+## 十三、API 服务 + 事件因子 + 推送模块说明（v6.0 新增）
+
+### 13.1 API 接口层 `api/main.py`
+
+基于 FastAPI 的 RESTful 接口，支持查询分析结果、信号、报告等。
+
+| 接口 | 方法 | 功能 |
+|------|------|------|
+| `/` | GET | 系统状态 |
+| `/health` | GET | 健康检查 |
+| `/analyze/{code}` | GET | 个股分析（`?days=N` 指定天数）|
+| `/analyze` | GET | 全量分析 |
+| `/signals` | GET | 今日信号列表（`?level=S` 指定级别）|
+| `/report` | GET | 今日报告（`?type=closing|morning`）|
+| `/report/morning` | GET | 盘前早报 |
+| `/stocks` | GET | 自选股列表 |
+| `/stats` | GET | 数据库统计 |
+
+**启动方式：**
+```bash
+# 命令行
+python main.py api        # 默认端口 8000
+python main.py api 8888   # 自定义端口
+
+# 或直接 uvicorn
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+**API 文档：** 启动后访问 `http://localhost:8000/docs` 自动生成 Swagger UI。
+
+### 13.2 事件驱动因子 `analyzer/event_factors.py`
+
+从公司公告中提取事件并计算影响因子：
+
+| 事件类型 | 关键词 | 历史影响 | 置信度 |
+|---------|--------|---------|:------:|
+| 业绩预增 | 业绩预增/大幅上升 | T+1 +3.2% | 高 |
+| 业绩预亏 | 业绩预亏/大幅下降 | T+1 -4.5% | 高 |
+| 高管增持 | 增持 | 5日累计+1.8% | 中 |
+| 高管减持 | 减持 | 5日累计-2.1% | 中 |
+| 股份回购 | 回购 | 3日累计+1.5% | 中 |
+| 中标合同 | 中标/重大合同 | T+1 +2.0% | 中 |
+| 分红送转 | 分红/送转/10送 | 公告日+1.0% | 低 |
+| 立案调查 | 立案/调查 | T+1 -5.0% | 高 |
+| 资产重组 | 重组/收购 | T+1 +3.0% | 中 |
+| 退市风险 | ST/退市 | T+1 -8.0% | 高 |
+
+**方法：**
+- `detect_events(announcements)` — 从公告文本检测事件
+- `calculate_event_impact(code, events)` — 计算综合事件影响
+- `get_hot_events(days=1)` — 获取近期高影响力事件
+- 数据来源：`announcements` 表（title / announce_type / summary / publish_date）
+
+**事件影响计算逻辑：**
+1. 遍历公告文本匹配关键词 → 识别事件类型
+2. 累加事件影响系数 → 得到总影响
+3. 置信度加权修正（高 ×1.0 / 中 ×0.7 / 低 ×0.5）
+4. 归一化评分 + 等级判定（重大/显著/一般/轻微）
+
+### 13.3 推送模块 `output/notifier.py`
+
+#### 支持通道
+
+| 通道 | 方法 | 配置 |
+|------|------|------|
+| 微信（OpenClaw） | `push_wechat()` | stdout print，OpenClaw 自动转发 |
+| Telegram Bot | `push_telegram()` | 环境变量 TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID |
+| 企业微信机器人 | `push_wechat_work()` | 环境变量 WECHAT_WORK_WEBHOOK |
+| 钉钉机器人 | `push_dingtalk()` | 环境变量 DINGTALK_WEBHOOK |
+
+#### 通知模板
+
+| 模板 | 方法 | 用途 |
+|------|------|------|
+| 盘前早报 | `morning_report_template(data)` | 每日 08:30 推送 |
+| 收盘晚报 | `closing_report_template(data)` | 每日 16:00 推送 |
+| 信号告警 | `signal_alert_template(signal)` | S/A 级信号实时推送 |
+| 风控告警 | `risk_alert_template(risk)` | 高风险预警实时推送 |
+
+#### 推送触发
+
+```python
+from output.notifier import Notifier
+
+# 自动分发到多个通道
+Notifier.push_report(report_text, channels=["wechat", "telegram"])
+
+# 或手动推送
+Notifier.push_wechat(markdown_text)
+```
+
+**命令触发：**
+```bash
+python main.py notify           # 推送收盘晚报
+python main.py notify morning   # 推送盘前早报
+python main.py notify signals   # 推送今日 S/A 级信号
+```
+
+Report 命令自动推送：`python main.py report` 或 `python main.py report morning` 生成报告后自动调用 notifier 推送到微信。
+
+### 13.4 目录结构（v6.0 完整版）
+
+```
+stockquantmodel/
+├── api/
+│   ├── __init__.py
+│   └── main.py              ← FastAPI 接口层（v6.0 新增）
+├── analyzer/
+│   ├── event_factors.py     ← 事件驱动因子（v6.0 新增）
+│   ├── stock_analyzer.py
+│   ├── report_generator.py
+│   ├── signal_grader.py
+│   ├── ... (其他分析模块)
+├── output/
+│   ├── __init__.py
+│   └── notifier.py          ← 多渠道推送模块（v6.0 新增）
+├── main.py                  ← 入口（新增 api / notify 命令）
+└── requirements.txt         ← 新增 fastapi / uvicorn
+```
+
+---
+
 ## 项目状态
 
 ✅ 采集模块已完成（多数据源全面采集）
@@ -964,4 +1088,4 @@ streamlit run dashboard/app.py
 ✅ AI 分析增强层已完成（NER/知识图谱/影响评估/推理链）v4.0
 ✅ 回测模块已完成（回测引擎 + Streamlit可视化看板）v5.0
 ✅ 技术指标 + 信号分级 + 动态风控已完成（技术面融合）v5.0
-⏳ 推送模块（待开发）
+✅ API 接口层 + 事件因子 + 推送模块已完成 v6.0

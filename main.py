@@ -13,6 +13,8 @@
     python main.py analyze 600519 3  # 分析指定股票（近3天）
     python main.py report        # 生成收盘晚报
     python main.py report morning  # 生成盘前早报
+    python main.py api           # 启动 FastAPI 服务
+    python main.py notify        # 触发推送（晚报+信号）
 """
 import sys
 import os
@@ -154,11 +156,104 @@ def cmd_report():
         if filepath:
             print(f"📁 已保存到: {filepath}")
         print(f"\n{report[:500]}..." if len(report) > 500 else f"\n{report}")
+
+        # 自动推送
+        try:
+            from output.notifier import Notifier
+            notifier = Notifier()
+            channels = ["wechat"]
+            notifier.push_report(report, channels=channels)
+            print(f"📣 已推送到: {', '.join(channels)}")
+        except Exception as e:
+            logger.warning(f"推送报告失败: {e}")
     else:
         print("❌ 报告生成失败")
 
 
+def cmd_api():
+    """启动 FastAPI 服务"""
+    import uvicorn
+
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else 8000
+    print(f"🚀 启动 FastAPI 服务: http://0.0.0.0:{port}")
+    print(f"   📖 API 文档: http://0.0.0.0:{port}/docs")
+
+    # 导入 api.main 确保路由注册
+    from api.main import app
+
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
+
+
+def cmd_notify():
+    """触发推送"""
+    from output.notifier import Notifier
+    from analyzer.report_generator import ReportGenerator
+    from analyzer.stock_analyzer import StockAnalyzer
+    from analyzer.event_factors import EventFactorEngine
+
+    notifier = Notifier()
+    gen = ReportGenerator()
+    analyzer = StockAnalyzer()
+    event_engine = EventFactorEngine()
+
+    notify_type = sys.argv[2] if len(sys.argv) > 2 else "closing"
+    channels = ["wechat"]
+
+    if notify_type == "morning":
+        # 盘前早报推送
+        print("🌅 推送盘前早报...")
+        report = gen.generate_morning_report()
+        if report:
+            results = notifier.push_report(report, channels=channels)
+            for ch, ok in results.items():
+                print(f"  {'✅' if ok else '❌'} {ch}")
+        else:
+            print("⚠️ 早报生成失败，可能为非交易日")
+
+    elif notify_type == "signals":
+        # 推送今日信号
+        print("🔴 推送今日信号...")
+        try:
+            results = analyzer.analyze_all_stocks()
+            signals = []
+            for r in results:
+                if r.get("confidence", 0) >= 0.6:
+                    level = "S" if r["confidence"] >= 0.8 else "A"
+                    signals.append({
+                        "code": r["code"],
+                        "name": r["name"],
+                        "level": level,
+                        "suggestion": r["suggestion"],
+                        "confidence": r["confidence"],
+                        "sentiment": r.get("avg_sentiment", 0),
+                    })
+
+            for s in signals:
+                msg = notifier.signal_alert_template(s)
+                notifier.push_report(msg, channels=channels)
+            print(f"✅ 推送 {len(signals)} 个信号")
+
+        except Exception as e:
+            logger.error(f"信号推送失败: {e}")
+            print(f"❌ 信号推送失败: {e}")
+
+    else:
+        # 默认推送收盘晚报
+        print("📊 推送收盘晚报...")
+        report = gen.generate_closing_report()
+        if report:
+            results = notifier.push_report(report, channels=channels)
+            for ch, ok in results.items():
+                print(f"  {'✅' if ok else '❌'} {ch}")
+        else:
+            print("⚠️ 晚报生成失败，可能为非交易日")
+
+    print("✅ 推送完成")
+
+
 def cmd_schedule():
+    """定时采集模式"""
+    import schedule as sch
     """定时采集模式"""
     import schedule as sch
     from collector.scheduler import CollectScheduler
@@ -215,6 +310,8 @@ if __name__ == "__main__":
         "schedule": cmd_schedule,
         "analyze": cmd_analyze,
         "report": cmd_report,
+        "api": cmd_api,
+        "notify": cmd_notify,
     }
 
     if command in commands:
