@@ -39,21 +39,25 @@ class HistoryQuotesCollector(BaseCollector):
             "end": "20500101",
         }
 
-    def _get_secid(self, code: str, market: str = None) -> str:
-        """根据股票代码获取 secid"""
-        # 自动判断市场
-        if market:
-            return market, code
-
+    def _get_secid(self, code: str, market: str = None) -> tuple:
+        """根据股票代码获取 secid (market_code, code)"""
         code_str = str(code).strip()
+        
+        # 市场代码转换
+        mkt_map = {"SH": "1", "SZ": "0", "BJ": "0"}
+        if market and market.upper() in mkt_map:
+            return mkt_map[market.upper()], code_str
+        
+        # 自动判断
+        if market:
+            return market, code_str
         if code_str.startswith("6") or code_str.startswith("9"):
-            return "1", code_str  # SH
+            return "1", code_str
         elif code_str.startswith("0") or code_str.startswith("3") or code_str.startswith("2"):
-            return "0", code_str  # SZ
+            return "0", code_str
         elif code_str.startswith("4"):
-            return "0", code_str  # 北交所
+            return "0", code_str
         else:
-            # 默认上海
             return "1", code_str
 
     def collect_stock(self, code: str, market: str = None, limit: int = 500) -> int:
