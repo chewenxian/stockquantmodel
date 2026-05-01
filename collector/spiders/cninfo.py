@@ -30,23 +30,50 @@ class CninfoCollector(BaseCollector):
         self.db = db
         self.search_url = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
 
+    @property
+    def _tracker_key(self) -> str:
+        return "cninfo"
+
     def collect(self) -> Dict[str, int]:
         results = {"error": 0}
+
+        # 先检查增量间隔（默认30分钟，公告不需要太频繁）
+        if not self.should_fetch(min_interval_minutes=30):
+            info = self.get_last_fetch()
+            logger.info(f"[巨潮] 跳过采集（上次 {info['last_success_at'][:19] if info else '未知'}，未到间隔）")
+            if info:
+                results["announcements"] = info["last_item_count"] or 0
+            return results
+
         stocks = self.db.load_stocks()
         try:
             results["announcements"] = self._collect_announcements(stocks)
+            self.mark_fetched(item_count=results["announcements"])
         except Exception as e:
             logger.error(f"[巨潮] 公告采集异常: {e}")
             results["announcements"] = 0
+            self.mark_fetched(error=str(e)[:200])
         total = sum(results.values())
         logger.info(f"[巨潮] 采集完成: {results}, 总计 {total} 条")
         return results
 
     def _collect_announcements(self, stocks: List[Dict]) -> int:
-        """采集公司公告 - 使用 JSON POST（已验证可用）"""
+        """采集公司公告 - 增量模式，只查上次采集到现在的数据"""
         count = 0
         today = datetime.now().strftime("%Y-%m-%d")
-        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+        # 增量查询：只查上次采集时间之后的数据
+        last_info = self.get_last_fetch()
+        if last_info and last_info.get("last_success_at"):
+            try:
+                last_dt = datetime.fromisoformat(last_info["last_success_at"])
+                # 往前多查2小时，防止漏掉时间窗口边缘的公告
+                start_date = (last_dt - timedelta(hours=2)).strftime("%Y-%m-%d")
+            except Exception:
+                start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        else:
+            # 首次采集：查最近7天
+            start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
         headers = {
             "Content-Type": "application/json",
@@ -78,7 +105,7 @@ class CninfoCollector(BaseCollector):
                     "secid": "",
                     "category": "category_ndbg_szsh;category_bndbg_szsh;category_yjdbg_szsh;category_dxrl_szsh;category_rz_szsh;category_bpszc_szsh",
                     "trade": "",
-                    "seDate": f"{week_ago}~{today}",
+                    "seDate": f"{start_date}~{today}",
                     "sortName": "",
                     "sortType": "",
                     "isHLtitle": True,
