@@ -141,8 +141,16 @@ CREATE TABLE analysis (
 - `extractor.py` — 关键词提取、股票代码检测、新闻分类、实体提取
 - `pipeline.py` — 管道编排：clean→dedup→extract 一站式处理
 
-### 6️⃣ 配置
-- `config.yaml` — 股票池、采集频率、模型参数
+### 6️⃣ 智能分析层 `analyzer/` (v3.0 新增)
+- `nlp_analyzer.py` — DeepSeek API 集成，新闻情绪分析、日报生成、交易建议
+- `sentiment.py` — 综合情绪评分、趋势分析、异常舆情检测
+- `advisor.py` — 交易建议生成器，多维置信度计算
+- `stock_analyzer.py` — 个股分析入口，数据整合+LLM分析+建议生成
+- `report_generator.py` — 盘前早报/收盘晚报生成
+- `config.yaml` — 分析模块配置
+
+### 7️⃣ 配置
+- `config.yaml` — 股票池、采集频率、模型参数、分析配置
 - `stocks.csv` — 自选股列表
 
 ---
@@ -358,11 +366,137 @@ print(f"已归档: {result}")
 
 ---
 
+## 九、智能分析层说明（v3.0）
+
+### 分析流程
+
+```
+┌───────────────┐
+│  读取数据      │  ← 从数据库读取新闻/公告/行情/资金
+└───────┬───────┘
+        │
+┌───────▼───────┐
+│  情绪分析      │  ← SentimentAnalyzer (规则+统计)
+│  - 文本情绪评分  │
+│  - 综合多维情绪  │
+│  - 异常检测     │
+└───────┬───────┘
+        │
+┌───────▼───────┐
+│  NLP 分析      │  ← NLPAnalyzer (DeepSeek API)
+│  - 新闻摘要     │
+│  - 情绪评分     │
+│  - 关键事件提取  │
+└───────┬───────┘
+        │
+┌───────▼───────┐
+│  建议生成      │  ← TradingAdvisor
+│  - 置信度计算   │
+│  - 建议等级     │
+│  - 风险评估    │
+└───────┬───────┘
+        │
+┌───────▼───────┐
+│  结果入库      │  → analysis 表
+│  生成日报      │  → ReportGenerator (Markdown)
+└───────────────┘
+```
+
+### 模块说明
+
+#### `analyzer/nlp_analyzer.py` — DeepSeek API 集成
+
+| 方法 | 功能 |
+|------|------|
+| `analyze_news(news_list)` | 对一批新闻做摘要+情绪分析，返回结构化JSON |
+| `generate_report(stock_results)` | 生成日报文本（Markdown） |
+| `get_trading_advice(sentiment, market)` | 基于多维数据生成交易建议 |
+
+**特性：**
+- API Key 从 `DEEPSEEK_API_KEY` 环境变量读取
+- 自动重试3次，超时30秒
+- 专业的 prompt engineering，中文输出
+- LLM 不可用时自动降级到规则兜底
+
+#### `analyzer/sentiment.py` — 综合情绪分析
+
+| 方法 | 功能 |
+|------|------|
+| `calculate_sentiment_score(news)` | 综合多维度情绪评分（来源权重+时效权重） |
+| `get_sentiment_trend(news_by_day)` | 情绪趋势分析 |
+| `detect_anomaly(news_list)` | 检测异常舆情（突发利空/利好） |
+
+**情绪词典：** 内置 A 股常用正面/负面词库，含增强词和减弱词处理
+
+#### `analyzer/advisor.py` — 交易建议生成器
+
+| 方法 | 功能 |
+|------|------|
+| `generate_advice(stock_analysis)` | 生成个股买卖建议 |
+| `calculate_confidence(sentiment, count, market)` | 多维置信度计算 |
+
+**建议等级：** 强烈买入 > 买入 > 持有 > 观望 > 卖出 > 强烈卖出
+**风险等级：** 高 / 中 / 低
+
+#### `analyzer/stock_analyzer.py` — 个股分析入口
+
+| 方法 | 功能 |
+|------|------|
+| `analyze_stock(code, days)` | 对单只股票完整分析 |
+| `analyze_all_stocks()` | 分析所有自选股 |
+
+**流程：** 读取数据 → 情绪分析 → LLM 分析 → 生成建议 → 写入 analysis 表
+
+#### `analyzer/report_generator.py` — 日报生成
+
+| 方法 | 功能 |
+|------|------|
+| `generate_morning_report()` | 盘前早报（08:30） |
+| `generate_closing_report()` | 收盘晚报（16:00） |
+
+**格式：** Markdown，含市场判断、个股分析、风险提示、操作建议
+**交易日判断：** 自动跳过周末和法定节假日
+
+### 使用方式
+
+```bash
+# 环境变量设置
+# 在 .zshrc 或运行前设置
+export DEEPSEEK_API_KEY="your_api_key_here"
+
+# 分析所有自选股
+python main.py analyze
+
+# 分析指定股票
+python main.py analyze 600519
+python main.py analyze 600519 3  # 分析近3天数据
+
+# 生成收盘晚报
+python main.py report
+
+# 生成盘前早报
+python main.py report morning
+```
+
+### 数据库升级 `storage/database.py` (v3.0)
+
+**新增方法：**
+- `get_latest_market_snapshot(code)` — 获取最新行情
+- `get_latest_money_flow(code)` — 获取最新资金流向
+- `save_analysis(code, data)` — 保存/更新分析结果（upsert）
+- `get_today_analysis()` — 获取今日所有分析结果
+- `get_recent_analysis(code, limit)` — 获取历史分析记录
+
+**analysis 表现有字段：**
+- `stock_code`, `date`, `news_count`, `avg_sentiment`, `sentiment_std`
+- `key_topics` (JSON), `llm_analysis`, `suggestion`
+- `confidence` (0~1), `risk_level` (high/medium/low)
+
+---
+
 ## 项目状态
 
 ✅ 采集模块已完成（多数据源全面采集）
 ✅ 数据处理层已完成（清洗/去重/提取/管道编排）v2.0
-⏳ 分析模块（待开发）
+✅ 分析模块已完成（NLP分析/情绪分析/交易建议/日报生成）v3.0
 ⏳ 推送模块（待开发）
-
-> 下一步：开始开发 DeepSeek API 智能分析模块？

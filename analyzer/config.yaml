@@ -1,0 +1,41 @@
+# ============================================
+# 智能分析模块配置
+# ============================================
+
+provider: deepseek
+model: deepseek-chat
+api_base: https://api.deepseek.com
+# API key 从 DEEPSEEK_API_KEY 环境变量读取
+
+schedule:
+  # cron 表达式: 分钟 小时 日 月 星期
+  morning: "30 8 * * 1-5"   # 盘前早报 交易日 08:30
+  closing: "0 16 * * 1-5"   # 收盘晚报 交易日 16:00
+
+# LLM 调用参数
+llm:
+  max_tokens: 2048
+  temperature: 0.3          # 较低温度保证分析一致性
+  timeout: 30               # API 超时秒数
+  retry_times: 3            # 失败重试次数
+  retry_delay: 2            # 重试间隔秒数
+
+# 情绪分析参数
+sentiment:
+  window_days: 5            # 情绪趋势窗口天数
+  anomaly_threshold: 0.6    # 异常检测阈值（情绪突变幅度）
+  min_news_for_analysis: 1  # 最少新闻数才生成分析
+
+# 建议参数
+advice:
+  min_confidence: 0.3       # 最低置信度才生成建议
+  strong_buy_threshold: 0.7  # 强烈买入情绪阈值
+  buy_threshold: 0.3        # 买入情绪阈值
+  sell_threshold: -0.3      # 卖出情绪阈值
+  strong_sell_threshold: -0.7 # 强烈卖出情绪阈值
+
+# 报告格式
+report:
+  max_stocks: 10            # 日报最多涵盖股票数
+  max_news_per_stock: 5     # 每只股最多引用新闻数
+  include_chart: false      # 是否包含图表

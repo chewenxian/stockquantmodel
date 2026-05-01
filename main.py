@@ -8,6 +8,11 @@
     python main.py init          # 初始化数据库和股票池
     python main.py schedule      # 启动定时任务模式
     python main.py stats         # 查看采集统计
+    python main.py analyze       # 分析所有自选股
+    python main.py analyze 600519  # 分析指定股票
+    python main.py analyze 600519 3  # 分析指定股票（近3天）
+    python main.py report        # 生成收盘晚报
+    python main.py report morning  # 生成盘前早报
 """
 import sys
 import os
@@ -95,6 +100,64 @@ def cmd_stats():
     print(f"  数据源: {', '.join(stats['collectors'])}")
 
 
+def cmd_analyze():
+    """执行个股分析"""
+    from analyzer.stock_analyzer import StockAnalyzer
+
+    code = sys.argv[2] if len(sys.argv) > 2 else None
+    days = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+
+    analyzer = StockAnalyzer()
+
+    if code:
+        print(f"🔄 开始分析 {code} (近{days}天)...")
+        result = analyzer.analyze_stock(code, days=days)
+        print(f"\n📊 {result['name']} ({result['code']})")
+        print(f"  情绪: {result['avg_sentiment']:.2f}")
+        print(f"  建议: {result['suggestion']} (置信度 {result['confidence']:.0%})")
+        print(f"  风险: {result['risk_level']}")
+        print(f"  分析: {result['summary'][:200]}")
+    else:
+        print("🔄 开始分析所有自选股...")
+        results = analyzer.analyze_all_stocks()
+        print(f"\n📊 分析完成: {len(results)} 只股票")
+        for r in results:
+            print(f"  {r['name']} ({r['code']}): 情绪={r['avg_sentiment']:.2f}, "
+                  f"建议={r['suggestion']}, 置信度={r['confidence']:.0%}")
+
+
+def cmd_report():
+    """生成日报"""
+    from analyzer.report_generator import ReportGenerator
+
+    report_type = sys.argv[2] if len(sys.argv) > 2 else "closing"
+
+    gen = ReportGenerator()
+
+    if not gen.is_trading_day():
+        print("⚠️ 非交易日，跳过报告生成")
+        return
+
+    if report_type == "morning":
+        print("🌅 生成盘前早报...")
+        report = gen.generate_morning_report()
+    elif report_type == "closing":
+        print("📊 生成收盘晚报...")
+        report = gen.generate_closing_report()
+    else:
+        print(f"未知报告类型: {report_type}，使用收盘晚报")
+        report = gen.generate_closing_report()
+
+    if report:
+        filepath = gen.save_report(report, report_type)
+        print(f"✅ 报告已生成")
+        if filepath:
+            print(f"📁 已保存到: {filepath}")
+        print(f"\n{report[:500]}..." if len(report) > 500 else f"\n{report}")
+    else:
+        print("❌ 报告生成失败")
+
+
 def cmd_schedule():
     """定时采集模式"""
     import schedule as sch
@@ -150,6 +213,8 @@ if __name__ == "__main__":
         "quick": cmd_quick,
         "stats": cmd_stats,
         "schedule": cmd_schedule,
+        "analyze": cmd_analyze,
+        "report": cmd_report,
     }
 
     if command in commands:

@@ -798,7 +798,7 @@ class Database:
     def get_stock_news_sentiment(self, code: str, days: int = 1):
         conn = self._connect()
         rows = conn.execute("""
-            SELECT n.title, n.source, n.published_at, ns.sentiment
+            SELECT n.id, n.title, n.source, n.published_at, n.summary, n.content, ns.sentiment
             FROM news_stocks ns
             JOIN news n ON ns.news_id = n.id
             WHERE ns.stock_code = ?
@@ -807,3 +807,134 @@ class Database:
         """, (code, f'-{days}')).fetchall()
         self._close(conn)
         return [dict(r) for r in rows]
+
+    # ═══════════════════════════════════════════
+    # 分析模块专用查询方法
+    # ═══════════════════════════════════════════
+
+    def get_latest_market_snapshot(self, code: str) -> Optional[Dict]:
+        """获取某只股票的最新行情快照"""
+        try:
+            conn = self._connect()
+            row = conn.execute("""
+                SELECT price, change_pct, volume, amount, high, low,
+                       open, turnover_rate, pe, pb, total_mv
+                FROM market_snapshots
+                WHERE stock_code = ?
+                ORDER BY snapshot_time DESC LIMIT 1
+            """, (code,)).fetchone()
+            self._close(conn)
+            return dict(row) if row else None
+        except Exception:
+            return None
+
+    def get_latest_money_flow(self, code: str) -> Optional[Dict]:
+        """获取某只股票的最新资金流向"""
+        try:
+            conn = self._connect()
+            row = conn.execute("""
+                SELECT main_net, retail_net, north_net, large_order_net, total_amount
+                FROM money_flow
+                WHERE stock_code = ?
+                ORDER BY date DESC LIMIT 1
+            """, (code,)).fetchone()
+            self._close(conn)
+            return dict(row) if row else None
+        except Exception:
+            return None
+
+    def save_analysis(self, code: str, analysis: Dict) -> bool:
+        """
+        保存或更新分析结果
+
+        Args:
+            code: 股票代码
+            analysis: 分析数据字典
+
+        Returns:
+            bool: 是否成功
+        """
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            conn = self._connect()
+
+            existing = conn.execute(
+                "SELECT id FROM analysis WHERE stock_code = ? AND date = ?",
+                (code, today)
+            ).fetchone()
+
+            if existing:
+                conn.execute("""
+                    UPDATE analysis SET
+                        news_count = ?, avg_sentiment = ?, sentiment_std = ?,
+                        key_topics = ?, llm_analysis = ?,
+                        suggestion = ?, confidence = ?, risk_level = ?
+                    WHERE stock_code = ? AND date = ?
+                """, (
+                    analysis.get("news_count", 0),
+                    analysis.get("avg_sentiment", 0.0),
+                    analysis.get("sentiment_std", 0.0),
+                    json.dumps(analysis.get("key_topics", []), ensure_ascii=False),
+                    analysis.get("summary", ""),
+                    analysis.get("suggestion", "持有"),
+                    analysis.get("confidence", 0.0),
+                    analysis.get("risk_level", "中"),
+                    code, today,
+                ))
+            else:
+                conn.execute("""
+                    INSERT INTO analysis (
+                        stock_code, date, news_count, avg_sentiment,
+                        sentiment_std, key_topics, llm_analysis,
+                        suggestion, confidence, risk_level
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    code, today,
+                    analysis.get("news_count", 0),
+                    analysis.get("avg_sentiment", 0.0),
+                    analysis.get("sentiment_std", 0.0),
+                    json.dumps(analysis.get("key_topics", []), ensure_ascii=False),
+                    analysis.get("summary", ""),
+                    analysis.get("suggestion", "持有"),
+                    analysis.get("confidence", 0.0),
+                    analysis.get("risk_level", "中"),
+                ))
+
+            conn.commit()
+            self._close(conn)
+            return True
+        except Exception as e:
+            logger = __import__('logging').getLogger(__name__)
+            logger.error(f"保存分析结果失败 ({code}): {e}")
+            return False
+
+    def get_today_analysis(self) -> List[Dict]:
+        """获取所有今日分析结果"""
+        try:
+            conn = self._connect()
+            today = datetime.now().strftime("%Y-%m-%d")
+            rows = conn.execute("""
+                SELECT a.*, s.name, s.market
+                FROM analysis a
+                LEFT JOIN stocks s ON a.stock_code = s.code
+                WHERE a.date = ?
+                ORDER BY ABS(a.avg_sentiment) DESC
+            """, (today,)).fetchall()
+            self._close(conn)
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def get_recent_analysis(self, code: str, limit: int = 30) -> List[Dict]:
+        """获取某只股票的历史分析记录"""
+        try:
+            conn = self._connect()
+            rows = conn.execute("""
+                SELECT * FROM analysis
+                WHERE stock_code = ?
+                ORDER BY date DESC LIMIT ?
+            """, (code, limit)).fetchall()
+            self._close(conn)
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
