@@ -222,7 +222,7 @@ def cmd_report():
         try:
             from output.notifier import Notifier
             notifier = Notifier()
-            channels = ["wechat", "feishu", "qq"]
+            channels = ["wechat", "feishu"]
             notifier.push_report(report, channels=channels)
             print(f"📣 已推送到: {', '.join(channels)}")
         except Exception as e:
@@ -258,7 +258,7 @@ def cmd_notify():
     event_engine = EventFactorEngine()
 
     notify_type = sys.argv[2] if len(sys.argv) > 2 else "closing"
-    channels = ["wechat", "feishu", "qq"]
+    channels = ["wechat", "feishu"]
 
     if notify_type == "morning":
         # 盘前早报推送
