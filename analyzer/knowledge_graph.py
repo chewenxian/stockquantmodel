@@ -1,18 +1,25 @@
 """
-金融知识图谱（轻量级）
-用 JSON 实现，不需要图数据库
+金融知识图谱（轻量级 + 外部 JSON + Neo4j 预留）
+用 JSON 实现，不需要图数据库，同时支持外部数据文件和 Neo4j 扩展。
 
 功能：
-1. 产业链关系（上下游）
+1. 产业链关系（上下游）50+ 行业
 2. 竞品关系（同行业竞争）
 3. 板块归属（股票→行业）
 4. 推理新闻的间接影响
+5. 文件持久化（data/knowledge_graph.json）
+6. Neo4j 接口预留
 """
+import json
+import os
 import re
 import logging
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Any
 
 logger = logging.getLogger(__name__)
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+KG_FILE = os.path.join(DATA_DIR, "knowledge_graph.json")
 
 
 class FinancialKnowledgeGraph:
@@ -20,24 +27,291 @@ class FinancialKnowledgeGraph:
     金融知识图谱
     存储产业链关系、股权关联、竞品关系
     用于推理新闻的间接影响
+
+    数据优先从 data/knowledge_graph.json 加载，
+    文件不存在时使用内置 dict 作为 fallback。
     """
 
-    def __init__(self):
-        # 内置知识图谱数据
-        # 这些数据硬编码在代码中，无需外部数据库
-        self._init_industry_chains()
-        self._init_competitors()
-        self._init_sector_mapping()
+    def __init__(self, kg_file: str = KG_FILE):
+        self.kg_file = kg_file
+        self.industry_chains: Dict[str, Dict[str, List[str]]] = {}
+        self.competitors: Dict[str, List[str]] = {}
+        self.sector_map: Dict[str, List[str]] = {}
+        self._code_to_name: Dict[str, str] = {}
+        self._name_to_code: Dict[str, str] = {}
+
+        # 尝试从外部文件加载
+        loaded = self._load_from_file()
+        if not loaded:
+            # 回退到内置数据
+            self._init_industry_chains()
+            self._init_competitors()
+            self._init_sector_mapping()
+
+        # 股票代码索引（无论哪种数据源都需建立）
         self._init_stock_code_index()
 
     # ──────────────────────────────────────────
-    # 产业链关系
+    # 文件持久化
+    # ──────────────────────────────────────────
+
+    def _load_from_file(self) -> bool:
+        """从外部 JSON 文件加载知识图谱数据"""
+        try:
+            if not os.path.exists(self.kg_file):
+                logger.info(f"知识图谱文件不存在: {self.kg_file}，使用内置数据")
+                return False
+
+            with open(self.kg_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            self.industry_chains = data.get("industry_chains", {})
+            self.competitors = data.get("competitors", {})
+            self.sector_map = data.get("sector_map", {})
+
+            logger.info(
+                f"从文件加载知识图谱: "
+                f"{len(self.industry_chains)} 条产业链, "
+                f"{len(self.competitors)} 条竞品关系, "
+                f"{len(self.sector_map)} 只股票映射"
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(f"加载知识图谱文件失败: {e}，使用内置数据")
+            return False
+
+    def _save_to_file(self, output_path: Optional[str] = None) -> bool:
+        """将当前知识图谱数据保存为外部 JSON 文件"""
+        save_path = output_path or self.kg_file
+        try:
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            data = {
+                "version": "2.0",
+                "generated_at": __import__("datetime").datetime.now().isoformat(),
+                "industry_chains": self.industry_chains,
+                "competitors": self.competitors,
+                "sector_map": self.sector_map,
+            }
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            chain_count = len(self.industry_chains)
+            comp_count = sum(len(v) for v in self.competitors.values())
+            sector_count = len(self.sector_map)
+            logger.info(
+                f"知识图谱已保存到 {save_path}: "
+                f"{chain_count} 条产业链, "
+                f"{comp_count} 条竞品, "
+                f"{sector_count} 只股票映射"
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(f"保存知识图谱失败: {e}")
+            return False
+
+    # ──────────────────────────────────────────
+    # Neo4j 预留接口
+    # ──────────────────────────────────────────
+
+    def neo4j_connect(self, uri: str = "", user: str = "", password: str = "") -> bool:
+        """
+        Neo4j 图数据库连接（预留）
+
+        当前为空实现，返回 True 表示预留成功。
+        将来可替换为真实连接：
+            from neo4j import GraphDatabase
+            self._neo4j_driver = GraphDatabase.driver(uri, auth=(user, password))
+
+        Args:
+            uri: Neo4j 连接地址
+            user: 用户名
+            password: 密码
+
+        Returns:
+            bool: 是否预留成功
+        """
+        logger.info("Neo4j 连接接口已预留（当前为空实现）")
+        return True
+
+    def neo4j_query_related(self, code: str, depth: int = 2) -> List[Dict]:
+        """
+        通过 Neo4j 查询关联实体（预留）
+
+        当前回退到本地 JSON 查询。
+        将来可替换为：
+            with self._neo4j_driver.session() as session:
+                result = session.run(
+                    "MATCH (s:Stock {code: $code})-[*1..$depth]-(related) RETURN related",
+                    code=code, depth=depth
+                )
+                return [dict(r["related"]) for r in result]
+
+        Args:
+            code: 股票代码
+            depth: 查询深度
+
+        Returns:
+            关联实体列表
+        """
+        # 回退到本地查询
+        related = []
+
+        # 查找竞品
+        comps = self.get_competitors(code)
+        for c in comps:
+            related.append({
+                "code": c["code"],
+                "name": c["name"],
+                "relation": "竞争",
+                "hop": 1,
+            })
+
+        # 查找同行/板块
+        sectors = self.get_sectors(code)
+        for sector in sectors:
+            if sector in self.industry_chains:
+                chain = self.industry_chains[sector]
+                for up in chain.get("上游", []):
+                    stocks = self._find_stocks_by_product(up)
+                    for s in stocks:
+                        if s["code"] != code:
+                            related.append({
+                                "code": s["code"],
+                                "name": s["name"],
+                                "relation": f"上游({up})",
+                                "hop": 1,
+                            })
+                for down in chain.get("下游", []):
+                    stocks = self._find_stocks_by_product(down)
+                    for s in stocks:
+                        if s["code"] != code:
+                            related.append({
+                                "code": s["code"],
+                                "name": s["name"],
+                                "relation": f"下游({down})",
+                                "hop": 1,
+                            })
+
+        return related
+
+    def neo4j_export(self, output_path: str = "kg_export.json") -> Dict[str, Any]:
+        """
+        将本地知识图谱导出为 Neo4j 可导入的格式（预留）
+
+        导出格式包含节点（nodes.csv）和关系（rels.csv）两个 CSV 文件，
+        以及一个统一的 JSON 文件用于导入说明。
+
+        Args:
+            output_path: JSON 导出路径模板（不含 .csv 后缀）
+
+        Returns:
+            {"node_count": n, "rel_count": m, "files": [...]}
+        """
+        export_dir = os.path.dirname(output_path) or "."
+        os.makedirs(export_dir, exist_ok=True)
+
+        base = output_path.replace(".json", "")
+        nodes_csv = f"{base}_nodes.csv"
+        rels_csv = f"{base}_rels.csv"
+
+        nodes: Set[str] = set()
+        rels: List[Dict] = []
+
+        # 1. 构建节点集
+        for code in self.sector_map:
+            nodes.add(code)
+            name = self._code_to_name.get(code, code)
+            sectors = self.sector_map.get(code, [])
+            rels.append({
+                "source": code,
+                "target": sectors[0] if sectors else "未知",
+                "relation": "属于板块",
+            })
+            for sector in sectors:
+                nodes.add(sector)
+
+        for product in self.industry_chains:
+            nodes.add(product)
+            for up in self.industry_chains[product].get("上游", []):
+                nodes.add(up)
+                rels.append({
+                    "source": up,
+                    "target": product,
+                    "relation": "供给",
+                })
+            for down in self.industry_chains[product].get("下游", []):
+                nodes.add(down)
+                rels.append({
+                    "source": product,
+                    "target": down,
+                    "relation": "供给",
+                })
+
+        for code, comp_list in self.competitors.items():
+            for comp in comp_list:
+                rels.append({
+                    "source": code,
+                    "target": comp,
+                    "relation": "竞争",
+                })
+
+        # 2. 写 CSV
+        try:
+            with open(nodes_csv, "w", encoding="utf-8") as f:
+                f.write("id:ID,label:LABEL,name\n")
+                for n in sorted(nodes):
+                    label = "Stock" if re.match(r"^\d{6}$", n) else "Sector"
+                    name = self._code_to_name.get(n, n)
+                    f.write(f"{n},{label},{name}\n")
+
+            with open(rels_csv, "w", encoding="utf-8") as f:
+                f.write(":START_ID,:END_ID,:TYPE\n")
+                for r in rels:
+                    f.write(f"{r['source']},{r['target']},{r['relation']}\n")
+        except Exception as e:
+            logger.warning(f"写入 CSV 文件失败: {e}")
+
+        # 3. 写 JSON
+        export_data = {
+            "version": "2.0",
+            "neo4j_import_instructions": "使用 neo4j-admin import 或 LOAD CSV 导入",
+            "nodes_count": len(nodes),
+            "rels_count": len(rels),
+            "files": {
+                "nodes_csv": nodes_csv,
+                "rels_csv": rels_csv,
+            },
+            "sample_cypher": """
+                // 查询某只股票的竞争关系和产业链上下游
+                MATCH (s:Stock {id: '600519'})-[r]-(n)
+                RETURN s.name, type(r), n.name
+            """,
+            "nodes": [{"id": n, "label": "Stock" if re.match(r"^\d{6}$", n) else "Sector",
+                       "name": self._code_to_name.get(n, n)} for n in sorted(nodes)],
+            "rels": rels,
+        }
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(export_data, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"Neo4j 导出完成: {len(nodes)} 节点, {len(rels)} 关系")
+        return {
+            "node_count": len(nodes),
+            "rel_count": len(rels),
+            "files": [output_path, nodes_csv, rels_csv],
+        }
+
+    # ──────────────────────────────────────────
+    # 产业链关系（50+ 行业）
     # ──────────────────────────────────────────
 
     def _init_industry_chains(self):
         """
         产业链关系定义
         格式：{product_or_sector: {"上游": [...], "下游": [...]}}
+        总条目 50+，涵盖主要中信/申万一级行业
         """
         self.industry_chains: Dict[str, Dict[str, List[str]]] = {
             # ── 锂电池产业链 ──
@@ -134,7 +408,7 @@ class FinancialKnowledgeGraph:
                 "下游": ["手机", "电脑", "可穿戴设备", "智能家居"],
             },
 
-            # ── 医药 ──
+            # ── 医药生物 ──
             "创新药": {
                 "上游": ["原料药", "CXO", "生物试剂", "实验设备"],
                 "下游": ["医院", "药房", "医保", "患者"],
@@ -151,8 +425,12 @@ class FinancialKnowledgeGraph:
                 "上游": ["中药材种植", "中药材贸易"],
                 "下游": ["医院", "药房", "OTC市场"],
             },
+            "医药生物": {
+                "上游": ["原料药", "生物试剂", "实验设备", "CXO"],
+                "下游": ["医院", "药房", "医保支付"],
+            },
 
-            # ── 煤炭 ──
+            # ── 能源煤炭 ──
             "煤炭": {
                 "上游": ["煤矿开采", "煤炭勘探"],
                 "下游": ["火电", "钢铁", "煤化工", "水泥"],
@@ -168,7 +446,29 @@ class FinancialKnowledgeGraph:
                 "下游": ["基建", "房地产", "汽车", "机械", "造船"],
             },
 
-            # ── 石油石化 ──
+            # ── 有色金属 ──
+            "有色金属": {
+                "上游": ["矿山开采", "矿石", "能源"],
+                "下游": ["汽车", "航空航天", "电子", "建筑", "电缆"],
+            },
+            "黄金": {
+                "上游": ["金矿开采", "黄金勘探"],
+                "下游": ["珠宝首饰", "央行储备", "投资需求"],
+            },
+            "铜": {
+                "上游": ["铜矿开采", "铜精矿"],
+                "下游": ["电力电缆", "建筑", "电子", "汽车"],
+            },
+            "铝": {
+                "上游": ["铝土矿", "氧化铝", "电力"],
+                "下游": ["建筑", "汽车", "包装", "航空航天"],
+            },
+            "稀土": {
+                "上游": ["稀土矿开采", "稀土分离"],
+                "下游": ["永磁材料", "新能源汽车", "风电", "消费电子"],
+            },
+
+            # ── 石化化工 ──
             "原油": {
                 "上游": ["石油勘探", "石油开采"],
                 "下游": ["炼化", "化工", "成品油", "航空燃料"],
@@ -177,8 +477,16 @@ class FinancialKnowledgeGraph:
                 "上游": ["原油"],
                 "下游": ["成品油", "化工品", "塑料", "化纤"],
             },
+            "化工": {
+                "上游": ["原油", "天然气", "煤炭", "矿石"],
+                "下游": ["塑料", "化纤", "涂料", "农药", "化肥", "医药"],
+            },
+            "化纤": {
+                "上游": ["PTA", "乙二醇", "己内酰胺"],
+                "下游": ["纺织服装", "工业用布"],
+            },
 
-            # ── 房地产 ──
+            # ── 房地产与基建 ──
             "房地产": {
                 "上游": ["水泥", "钢铁", "玻璃", "建材", "工程机械"],
                 "下游": ["装修", "家电", "家居", "物业管理"],
@@ -187,14 +495,48 @@ class FinancialKnowledgeGraph:
                 "上游": ["钢铁", "水泥", "工程机械", "沥青"],
                 "下游": ["交通运输", "城市建设", "水利"],
             },
+            "建筑装饰": {
+                "上游": ["钢铁", "水泥", "玻璃", "铝材", "涂料"],
+                "下游": ["房地产", "基建", "商业地产"],
+            },
+            "建筑材料": {
+                "上游": ["石灰石", "石膏", "砂石", "化工原料"],
+                "下游": ["房地产", "基建", "建筑装饰"],
+            },
+
+            # ── 金融 ──
+            "银行": {
+                "上游": ["居民存款", "企业存款", "央行再贷款"],
+                "下游": ["企业贷款", "个人贷款", "同业业务"],
+            },
+            "保险": {
+                "上游": ["保费收入", "再保险"],
+                "下游": ["保险赔付", "投资理财", "养老保险"],
+            },
+            "证券": {
+                "上游": ["投资者资金", "交易所行情"],
+                "下游": ["经纪业务", "投行业务", "资管业务", "自营投资"],
+            },
 
             # ── 军工 ──
             "军工": {
                 "上游": ["特种材料", "精密制造", "芯片", "雷达"],
                 "下游": ["国防装备", "航天", "航空"],
             },
+            "国防军工": {
+                "上游": ["特种钢材", "电子元器件", "精密机械", "复合材料"],
+                "下游": ["武器系统", "航空航天", "舰船", "信息化装备"],
+            },
 
-            # ── 新能源汽车零部件 ──
+            # ── 汽车 ──
+            "汽车": {
+                "上游": ["钢铁", "橡胶", "玻璃", "汽车零部件", "芯片"],
+                "下游": ["汽车销售", "汽车后市场", "二手车", "汽车金融"],
+            },
+            "汽车零部件": {
+                "上游": ["钢铁", "铝合金", "塑料", "橡胶", "电子元器件"],
+                "下游": ["汽车", "新能源汽车"],
+            },
             "动力电池": {
                 "上游": ["锂电池", "正极材料", "负极材料", "电解液", "隔膜"],
                 "下游": ["新能源汽车"],
@@ -204,10 +546,120 @@ class FinancialKnowledgeGraph:
                 "下游": ["新能源汽车", "充电运营"],
             },
 
-            # ── 农业 ──
+            # ── 食品饮料 ──
+            "食品饮料": {
+                "上游": ["农产品", "畜禽", "糖", "包装材料"],
+                "下游": ["商超", "电商", "餐饮", "便利店"],
+            },
+            "白酒": {
+                "上游": ["粮食", "包材"],
+                "下游": ["经销", "烟酒店", "电商", "餐饮"],
+            },
+            "乳制品": {
+                "上游": ["原奶", "奶牛养殖"],
+                "下游": ["商超", "电商", "便利店"],
+            },
+
+            # ── 家电 ──
+            "家电": {
+                "上游": ["铜", "铝", "塑料", "芯片", "压缩机", "电机"],
+                "下游": ["房地产", "电商", "家电卖场", "以旧换新"],
+            },
+
+            # ── 纺织服装 ──
+            "纺织服装": {
+                "上游": ["棉花", "化纤", "染料", "纱线"],
+                "下游": ["服装品牌", "电商", "外贸出口"],
+            },
+
+            # ── 电子 ──
+            "电子": {
+                "上游": ["半导体", "电子元器件", "PCB", "被动元件"],
+                "下游": ["消费电子", "通信", "汽车电子", "工业控制"],
+            },
+            "面板": {
+                "上游": ["玻璃基板", "液晶材料", "偏光片", "驱动芯片"],
+                "下游": ["电视", "手机", "电脑", "车载显示"],
+            },
+
+            # ── 计算机 ──
+            "计算机": {
+                "上游": ["芯片", "服务器", "操作系统", "数据库"],
+                "下游": ["云计算", "企业服务", "政务信息化", "金融科技"],
+            },
+            "软件": {
+                "上游": ["开发工具", "云计算平台", "AI模型"],
+                "下游": ["企业软件", "政务软件", "工业软件", "SaaS"],
+            },
+
+            # ── 通信 ──
+            "通信": {
+                "上游": ["光模块", "光纤光缆", "基站设备", "芯片"],
+                "下游": ["5G/6G", "物联网", "数据中心", "云计算"],
+            },
+
+            # ── 传媒 ──
+            "传媒": {
+                "上游": ["内容制作", "IP版权", "艺人经纪"],
+                "下游": ["广告", "电影", "游戏", "流媒体", "社交媒体"],
+            },
+            "游戏": {
+                "上游": ["游戏引擎", "美术外包", "IP授权"],
+                "下游": ["游戏发行", "直播平台", "电竞赛事"],
+            },
+
+            # ── 公用事业 ──
+            "公用事业": {
+                "上游": ["煤炭", "天然气", "水电", "核电燃料"],
+                "下游": ["居民用电", "工业用电", "供暖", "供水"],
+            },
+            "电力": {
+                "上游": ["煤炭", "天然气", "水电", "风电", "光伏", "核电"],
+                "下游": ["居民", "工业", "商业", "数据中心"],
+            },
+
+            # ── 交通运输 ──
+            "交通运输": {
+                "上游": ["燃油", "汽车", "航空器", "船舶", "铁路设备"],
+                "下游": ["物流", "客运", "货运", "快递"],
+            },
+            "物流": {
+                "上游": ["交通运输", "仓储", "信息系统"],
+                "下游": ["电商", "制造业", "零售"],
+            },
+            "航空": {
+                "上游": ["航空煤油", "飞机制造", "机场"],
+                "下游": ["客运", "货运", "旅游"],
+            },
+
+            # ── 商贸零售 ──
+            "商贸零售": {
+                "上游": ["消费品", "食品饮料", "服装", "家电"],
+                "下游": ["消费者", "电商", "线下门店"],
+            },
+
+            # ── 农林牧渔 ──
+            "农林牧渔": {
+                "上游": ["种子", "饲料", "农药", "化肥"],
+                "下游": ["食品加工", "餐饮", "超市"],
+            },
             "猪肉": {
                 "上游": ["饲料", "玉米", "豆粕", "种猪"],
                 "下游": ["屠宰", "肉制品加工", "冷链物流"],
+            },
+            "种业": {
+                "上游": ["种质资源", "生物育种技术"],
+                "下游": ["农业种植", "粮食安全"],
+            },
+
+            # ── 新增: 综合 ──
+            "机械": {
+                "上游": ["钢铁", "铸锻件", "液压件", "轴承", "电机"],
+                "下游": ["基建", "制造业", "矿山", "农业"],
+            },
+            "环保": {
+                "上游": ["环保设备", "监测仪器", "药剂"],
+                "下游": ["污水处理", "大气治理", "固废处理"],
             },
         }
 
@@ -251,9 +703,20 @@ class FinancialKnowledgeGraph:
             # 银行
             "600036": ["601166", "600016", "000001", "601398", "601939"],
             "601166": ["600036", "600016", "000001"],
+            "601398": ["601939", "601288", "601988"],
+            "601939": ["601398", "601288", "601988"],
+            "601288": ["601398", "601939", "601988"],
+            "601988": ["601398", "601939", "601288"],
 
             # 保险
-            "601318": ["601601", "601628"],
+            "601318": ["601601", "601628", "601336"],
+            "601601": ["601318", "601628", "601336"],
+            "601628": ["601318", "601601", "601336"],
+
+            # 券商
+            "600030": ["601211", "600837", "002736", "601688"],
+            "601211": ["600030", "600837", "002736", "601688"],
+            "600837": ["600030", "601211", "002736", "601688"],
 
             # 家电
             "000333": ["000651", "600690"],
@@ -263,13 +726,11 @@ class FinancialKnowledgeGraph:
             # 医药
             "600276": ["300760", "603259", "300015"],
             "300760": ["600276", "603259", "300015"],
+            "603259": ["600276", "300760", "300015"],
 
             # 煤炭
             "601225": ["600188", "600546"],
             "600188": ["601225", "600546"],
-
-            # 券商
-            "600030": ["601211", "600837", "002736", "601688"],
 
             # 通信
             "600941": ["600050", "601728"],
@@ -277,6 +738,42 @@ class FinancialKnowledgeGraph:
 
             # 电动车整车
             "002594": ["600104", "000625", "601238", "601633"],
+
+            # 地产
+            "000002": ["001979", "600048", "600383"],
+            "001979": ["000002", "600048", "600383"],
+            "600048": ["000002", "001979", "600383"],
+
+            # 化工
+            "600309": ["600346", "601233", "002064"],
+            "600346": ["600309", "601233", "002064"],
+
+            # 有色金属
+            "601899": ["600547", "000630", "000831"],
+            "600547": ["601899", "000630"],
+            "000831": ["600111", "600010"],
+
+            # 钢铁
+            "600019": ["000708", "000898", "600010"],
+            "000708": ["600019", "000898", "600010"],
+
+            # 食品饮料
+            "600887": ["002714", "000895", "603288"],
+            "603288": ["600887", "002714"],
+            "000895": ["600887", "002714"],
+
+            # 计算机/软件
+            "688111": ["600588", "002230"],
+            "600588": ["688111", "002230"],
+            "002230": ["688111", "600588"],
+
+            # 传媒
+            "300413": ["002555", "603444", "300418"],
+            "002555": ["300413", "603444", "300418"],
+
+            # 交通运输
+            "002352": ["002120", "601006", "600029"],
+            "601006": ["002352", "601111", "600029"],
         }
 
     # ──────────────────────────────────────────
@@ -289,23 +786,29 @@ class FinancialKnowledgeGraph:
         格式：{code: [sector1, sector2, ...]}
         """
         self.sector_map: Dict[str, List[str]] = {
-            "600519": ["白酒", "消费"],
-            "000858": ["白酒", "消费"],
-            "000568": ["白酒", "消费"],
-            "002304": ["白酒", "消费"],
-            "600809": ["白酒", "消费"],
-            "000596": ["白酒", "消费"],
+            # ── 白酒消费 ──
+            "600519": ["白酒", "消费", "食品饮料"],
+            "000858": ["白酒", "消费", "食品饮料"],
+            "000568": ["白酒", "消费", "食品饮料"],
+            "002304": ["白酒", "消费", "食品饮料"],
+            "600809": ["白酒", "消费", "食品饮料"],
+            "000596": ["白酒", "消费", "食品饮料"],
 
-            "300750": ["锂电池", "新能源汽车", "新能源"],
+            # ── 新能源 ──
+            "300750": ["锂电池", "新能源汽车", "新能源", "电力设备"],
             "002594": ["新能源汽车", "汽车", "新能源"],
             "300014": ["锂电池", "新能源"],
             "002340": ["锂电池", "有色金属", "新能源"],
             "688005": ["锂电池", "新能源"],
 
+            # ── 锂矿/有色 ──
             "002460": ["有色金属", "锂电池", "锂矿"],
             "002466": ["有色金属", "锂电池", "锂矿"],
             "600111": ["有色金属", "稀土"],
+            "601899": ["有色金属", "黄金", "铜"],
+            "600547": ["有色金属", "黄金"],
 
+            # ── 光伏 ──
             "600438": ["光伏", "新能源"],
             "601012": ["光伏", "新能源"],
             "002459": ["光伏", "新能源"],
@@ -315,6 +818,7 @@ class FinancialKnowledgeGraph:
             "688390": ["光伏", "新能源", "逆变器"],
             "600089": ["光伏", "新能源", "电力设备"],
 
+            # ── 半导体 ──
             "688981": ["半导体", "芯片"],
             "688012": ["半导体", "半导体设备", "芯片"],
             "688396": ["半导体", "芯片"],
@@ -325,6 +829,7 @@ class FinancialKnowledgeGraph:
             "603501": ["半导体", "芯片"],
             "603160": ["半导体", "芯片"],
 
+            # ── 银行 ──
             "600036": ["银行", "金融"],
             "601166": ["银行", "金融"],
             "600016": ["银行", "金融"],
@@ -335,70 +840,147 @@ class FinancialKnowledgeGraph:
             "601988": ["银行", "金融"],
             "601328": ["银行", "金融"],
             "002142": ["银行", "金融"],
+            "600000": ["银行", "金融"],
+            "601838": ["银行", "金融"],
+            "600919": ["银行", "金融"],
 
+            # ── 保险 ──
             "601318": ["保险", "金融"],
             "601601": ["保险", "金融"],
             "601628": ["保险", "金融"],
+            "601336": ["保险", "金融"],
 
-            "600030": ["券商", "金融"],
-            "601211": ["券商", "金融"],
-            "600837": ["券商", "金融"],
+            # ── 券商 ──
+            "600030": ["券商", "金融", "证券"],
+            "601211": ["券商", "金融", "证券"],
+            "600837": ["券商", "金融", "证券"],
+            "002736": ["券商", "金融", "证券"],
+            "601688": ["券商", "金融", "证券"],
+            "300059": ["券商", "金融", "互联网金融"],
 
+            # ── 家电 ──
             "000333": ["家电", "消费"],
             "000651": ["家电", "消费"],
             "600690": ["家电", "消费"],
+            "000100": ["家电", "消费", "电子"],
 
-            "300059": ["券商", "金融", "互联网金融"],
+            # ── 医药 ──
+            "600276": ["医药", "医药生物", "创新药"],
+            "300760": ["医疗器械", "医药", "医药生物"],
+            "603259": ["医药", "CXO", "医药生物"],
+            "300015": ["医药", "医疗服务", "医药生物"],
+            "600196": ["医药", "医药生物"],
+            "000661": ["医药", "医药生物"],
 
-            "600276": ["医药", "创新药"],
-            "300760": ["医疗器械", "医药"],
-            "603259": ["医药", "CXO"],
-            "300015": ["医药", "医疗服务"],
-
+            # ── 通信 ──
             "600941": ["通信", "电信"],
             "600050": ["通信", "电信"],
             "601728": ["通信", "电信"],
             "000063": ["通信", "5G"],
 
+            # ── 煤炭/能源 ──
             "601225": ["煤炭", "能源"],
             "600188": ["煤炭", "能源"],
             "600546": ["煤炭", "能源"],
 
+            # ── 电子 ──
             "002415": ["电子", "安防", "人工智能"],
-            "002230": ["人工智能", "AI", "科技"],
-            "688111": ["人工智能", "云计算", "软件"],
+            "002475": ["电子", "消费电子"],
+            "601138": ["电子", "消费电子", "计算机"],
+            "002241": ["电子", "消费电子"],
+            "300433": ["电子", "消费电子"],
+            "600745": ["电子", "半导体"],
 
+            # ── AI/科技 ──
+            "002230": ["人工智能", "AI", "科技", "计算机"],
+            "688111": ["人工智能", "云计算", "软件", "计算机"],
+            "300124": ["人工智能", "电力设备", "机械"],
+            "300033": ["金融科技", "计算机", "券商"],
+
+            # ── 机械 ──
             "600031": ["机械", "工程机械"],
             "000338": ["机械", "汽车零部件"],
-            "600150": ["军工", "船舶"],
-            "600893": ["军工", "航空"],
-            "600760": ["军工", "航空"],
+            "601766": ["机械", "轨道交通"],
 
-            "600900": ["电力", "新能源发电"],
-            "601985": ["电力", "核电"],
-            "600905": ["电力", "新能源发电"],
+            # ── 军工 ──
+            "600150": ["军工", "船舶", "国防军工"],
+            "600893": ["军工", "航空", "国防军工"],
+            "600760": ["军工", "航空", "国防军工"],
 
+            # ── 电力/公用事业 ──
+            "600900": ["电力", "新能源发电", "公用事业"],
+            "601985": ["电力", "核电", "公用事业"],
+            "600905": ["电力", "新能源发电", "公用事业"],
+            "600886": ["电力", "新能源发电", "公用事业"],
+
+            # ── 农林牧渔 ──
             "002714": ["农林牧渔", "猪肉"],
             "000895": ["农林牧渔", "食品饮料"],
             "300498": ["农林牧渔", "猪肉"],
+            "002311": ["农林牧渔", "饲料"],
 
-            "600585": ["建材", "水泥", "基建"],
+            # ── 建材/钢铁 ──
+            "600585": ["建材", "水泥", "基建", "建筑材料"],
             "600019": ["钢铁", "材料"],
             "000708": ["钢铁", "材料"],
+            "000898": ["钢铁", "材料"],
+            "600010": ["钢铁", "材料", "有色金属"],
 
+            # ── 交通运输 ──
             "002352": ["交通运输", "物流", "快递"],
             "601006": ["交通运输", "铁路"],
+            "600029": ["交通运输", "航空"],
+            "601111": ["交通运输", "航空"],
 
-            "600886": ["电力", "新能源发电"],
-            "601668": ["基建", "建筑"],
+            # ── 地产 ──
+            "000002": ["房地产", "地产"],
+            "001979": ["房地产", "地产"],
+            "600048": ["房地产", "地产"],
+            "600383": ["房地产", "地产"],
+
+            # ── 汽车 ──
             "600104": ["汽车", "新能源汽车"],
             "000625": ["汽车", "新能源汽车"],
             "601238": ["汽车", "新能源汽车"],
-            "601899": ["有色金属", "黄金", "铜"],
-            "600028": ["石油石化", "能源"],
-            "601857": ["石油石化", "能源"],
+            "601633": ["汽车", "新能源汽车"],
+
+            # ── 石化 ──
+            "600028": ["石油石化", "能源", "化工"],
+            "601857": ["石油石化", "能源", "化工"],
+
+            # ── 化工 ──
             "600309": ["化工", "材料"],
             "600346": ["化工", "石油石化"],
+            "601233": ["化工", "化纤"],
+
+            # ── 建筑 ──
+            "601668": ["基建", "建筑", "建筑装饰"],
+            "601390": ["基建", "建筑", "建筑装饰"],
+            "601800": ["基建", "建筑", "建筑装饰"],
+            "601186": ["基建", "建筑", "建筑装饰"],
+
+            # ── 计算机/软件 ──
+            "600588": ["计算机", "软件"],
+            "603444": ["传媒", "游戏"],
+            "300418": ["传媒", "游戏", "计算机"],
+
+            # ── 传媒 ──
+            "300413": ["传媒", "互联网"],
+            "002555": ["传媒", "游戏"],
+
+            # ── 消费/食品 ──
+            "600887": ["食品饮料", "消费"],
+            "603288": ["食品饮料", "消费"],
+
+            # ── 纺织服装 ──
+            "002832": ["纺织服装", "消费"],
+            "002291": ["纺织服装", "消费"],
+            "600177": ["纺织服装", "消费"],
+
+            # ── 商贸零售 ──
+            "002024": ["商贸零售", "消费"],
+            "601933": ["商贸零售", "消费"],
+            "603708": ["商贸零售", "消费"],
         }
 
     # ──────────────────────────────────────────
@@ -469,12 +1051,24 @@ class FinancialKnowledgeGraph:
                 "002714": "牧原股份", "000895": "双汇发展",
                 "300498": "温氏股份", "002311": "海大集团",
                 "600309": "万华化学", "600346": "恒力石化",
+                "601233": "桐昆股份", "600547": "山东黄金",
+                "603288": "海天味业", "000898": "鞍钢股份",
+                "002736": "国信证券", "601688": "华泰证券",
+                "600029": "南方航空", "601111": "中国国航",
+                "001979": "招商蛇口", "600048": "保利发展",
+                "600383": "金地集团", "601390": "中国中铁",
+                "601800": "中国交建", "601186": "中国铁建",
+                "603444": "吉比特", "300418": "昆仑万维",
+                "002555": "三七互娱", "002832": "比音勒芬",
+                "002291": "星期六", "600177": "雅戈尔",
+                "002024": "苏宁易购", "601933": "永辉超市",
+                "603708": "家家悦", "601633": "长城汽车",
             }
             self._code_to_name = fallback
             self._name_to_code = {v: k for k, v in fallback.items()}
 
     # ══════════════════════════════════════════
-    # 核心方法
+    # 核心方法（以下方法与之前版本保持兼容）
     # ══════════════════════════════════════════
 
     def _resolve_code(self, code_or_name: str) -> Optional[str]:
@@ -634,9 +1228,7 @@ class FinancialKnowledgeGraph:
             {
                 "direct_impact": "利好/利空/中性",
                 "direct_reason": "...",
-                "chain_reactions": [
-                    {"target": "某公司", "relation": "下游", "impact": "利好", "reason": "..."},
-                ],
+                "chain_reactions": [...],
                 "related_stocks": [...],
                 "impact_reasoning": ["推理步骤1", "推理步骤2"]
             }
@@ -683,14 +1275,12 @@ class FinancialKnowledgeGraph:
             sentiment = max(-1.0, min(1.0, sentiment))
 
             # 3. 分析对本公司影响
-            # 先查公司产业链
             chain = {}
             for sector in sectors:
                 if sector in self.industry_chains:
                     chain = self.industry_chains[sector]
                     break
 
-            # 如果有个股特定产品链
             for product, c in self.industry_chains.items():
                 if product in name:
                     chain = c
@@ -699,12 +1289,10 @@ class FinancialKnowledgeGraph:
             # 4. 推理传播路径
             if mentioned_products:
                 for mp in mentioned_products:
-                    # 看公司在哪个环节
                     mp_chain = self.industry_chains.get(mp, {})
 
                     # 公司是上游供应商
                     if mp in mp_chain.get("下游", []):
-                        direction = "下游→上游"
                         if sentiment > 0:
                             result["direct_impact"] = "利好"
                             result["direct_reason"] = f"{mp}需求上升，作为上游供应商受益"
@@ -716,19 +1304,15 @@ class FinancialKnowledgeGraph:
 
                     # 公司是下游客户
                     if mp in mp_chain.get("上游", []):
-                        direction = "上游→下游"
                         if sentiment > 0:
-                            # 上游涨价→下游成本上升（利空）
                             result["direct_impact"] = "利空"
                             result["direct_reason"] = f"{mp}涨价，下游成本上升"
                             reasoning.append(f"{mp}价格上涨 → 下游{name}成本上升 → 利空")
                         elif sentiment < 0:
-                            # 上游跌价→下游成本下降（利好）
                             result["direct_impact"] = "利好"
                             result["direct_reason"] = f"{mp}跌价，下游成本下降"
                             reasoning.append(f"{mp}价格下跌 → 下游{name}成本下降 → 利好")
 
-                    # 公司是竞争对手
                     if mp == name or name in mp:
                         if sentiment > 0:
                             result["direct_impact"] = "利好"
@@ -767,7 +1351,6 @@ class FinancialKnowledgeGraph:
                     # 6. 产业链传导影响
                     for direction_key in ["上游", "下游"]:
                         for related in chain.get(direction_key, []):
-                            # 查找相关股票
                             related_stocks = self._find_stocks_by_product(related)
                             for rs in related_stocks:
                                 if rs["code"] == code:
@@ -868,7 +1451,7 @@ class FinancialKnowledgeGraph:
                             "impact": "需进一步分析",
                         })
 
-            return related[:20]  # 最多20条
+            return related[:20]
 
         except Exception as e:
             logger.warning(f"获取相关股票失败: {e}")
@@ -888,7 +1471,6 @@ class FinancialKnowledgeGraph:
                         results.append({"code": code, "name": name})
                     break
 
-        # 如果通过板块没找到，通过股票名称关键词匹配
         if not results:
             for code, name in self._code_to_name.items():
                 if product in name or name in product:
@@ -907,31 +1489,47 @@ if __name__ == "__main__":
 
     kg = FinancialKnowledgeGraph()
 
-    # 测试获取产业链
-    print("===== 产业链 =====")
-    chain = kg.get_chain("碳酸锂")
-    print(f"碳酸锂 上游: {chain.get('上游', [])}")
-    print(f"碳酸锂 下游: {chain.get('下游', [])}")
+    # 统计
+    chain_count = len(kg.industry_chains)
+    comp_count = sum(len(v) for v in kg.competitors.values())
+    sector_count = len(kg.sector_map)
+    print(f"📊 知识图谱统计: {chain_count} 条产业链, {comp_count} 条竞品, {sector_count} 只股票")
 
-    chain2 = kg.get_chain("宁德时代")
-    print(f"\n宁德时代 产业链: {chain2}")
+    # 测试获取产业链
+    print("\n===== 产业链 =====")
+    for test_key in ["碳酸锂", "钢铁", "银行", "保险", "证券", "房地产", "有色金属", "国防军工"]:
+        chain = kg.get_chain(test_key)
+        ups = chain.get("上游", [])
+        downs = chain.get("下游", [])
+        print(f"  {test_key}: 上游 {ups[:4]}... 下游 {downs[:4]}...")
 
     # 测试竞品
     print("\n===== 竞品 =====")
-    comps = kg.get_competitors("600519")
-    print(f"贵州茅台 竞品: {[c['name'] for c in comps]}")
+    for test_code in ["600519", "600036", "601318", "601899"]:
+        comps = kg.get_competitors(test_code)
+        names = [c['name'] for c in comps[:3]]
+        print(f"  {test_code}: {names}...")
 
     # 测试板块归属
     print("\n===== 板块归属 =====")
-    sectors = kg.get_sectors("300750")
-    print(f"宁德时代 板块: {sectors}")
+    for test_code in ["300750", "601398", "002142"]:
+        sectors = kg.get_sectors(test_code)
+        print(f"  {test_code}: {sectors}")
+
+    # 测试保存
+    print("\n===== 文件持久化 =====")
+    ok = kg._save_to_file("/tmp/kg_test.json")
+    print(f"  保存: {'✅' if ok else '❌'}")
+
+    # 测试 Neo4j 接口
+    print("\n===== Neo4j 预留接口 =====")
+    print(f"  neo4j_connect: {kg.neo4j_connect('bolt://localhost:7687', 'neo4j', 'password')}")
+    related = kg.neo4j_query_related("600519", depth=2)
+    print(f"  neo4j_query_related(600519): {len(related)} 条结果")
 
     # 测试推理影响
     print("\n===== 影响推理 =====")
     news = "碳酸锂价格暴跌，锂电池成本有望大幅下降"
     impact = kg.infer_impact("300750", news)
-    print(f"直接冲击: {impact['direct_impact']} - {impact['direct_reason']}")
-    print(f"推理链: {impact['impact_reasoning']}")
-    print(f"连锁反应: {len(impact['chain_reactions'])} 条")
-    for cr in impact['chain_reactions'][:3]:
-        print(f"  → {cr['target']}: {cr['impact']} ({cr['reason']})")
+    print(f"  直接冲击: {impact['direct_impact']} - {impact['direct_reason']}")
+    print(f"  推理链: {impact['impact_reasoning']}")

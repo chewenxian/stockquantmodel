@@ -9,6 +9,8 @@ from datetime import datetime
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
+from utils.logging_ext import CollectorError
+
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,11 @@ class BaseCollector:
                 logger.warning(f"[{self.__class__.__name__}] GET {url} 失败 (尝试 {attempt+1}/3): {e}")
                 if attempt < 2:
                     time.sleep(2 ** attempt)
+                if attempt >= 2:
+                    raise CollectorError(
+                        f"采集请求失败: {url}",
+                        details={"url": url, "attempts": 3, "error": str(e)}
+                    )
         return None
 
     def get_json(self, url: str, params: dict = None, **kwargs) -> Optional[dict]:
@@ -82,7 +89,12 @@ class BaseCollector:
         return resp.text if resp else ""
 
     def collect(self) -> int:
-        """子类实现：执行一次采集，返回采集数量"""
+        """
+        子类实现：执行一次采集，返回采集数量
+
+        Raises:
+            CollectorError: 采集失败时抛出
+        """
         raise NotImplementedError
 
     # ───────────────────────────────────

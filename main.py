@@ -30,16 +30,37 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def setup_logging():
+def setup_logging(json_log=False):
+    """
+    配置日志
+
+    Args:
+        json_log: 是否使用 JSON 格式结构化日志。
+                  启用后会在控制台输出 JSON 格式日志。
+                  文件日志始终保留可读格式。
+    """
     os.makedirs("logs", exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler("logs/stock_quant.log", encoding="utf-8"),
-        ]
-    )
+
+    if json_log:
+        # JSON 结构化日志模式
+        from utils.logging_ext import setup_json_logging, JSONFormatter
+        setup_json_logging(log_file="logs/stock_quant.json.log")
+        # 同时保持文件可读日志
+        fh = logging.FileHandler("logs/stock_quant.log", encoding="utf-8")
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+        ))
+        logging.getLogger().addHandler(fh)
+    else:
+        # 默认可读格式
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler("logs/stock_quant.log", encoding="utf-8"),
+            ]
+        )
 
 
 def cmd_init():
@@ -548,7 +569,13 @@ def cmd_schedule():
 
 if __name__ == "__main__":
     import time
-    setup_logging()
+
+    # 解析 --json-log 参数
+    json_log = "--json-log" in sys.argv
+    if json_log:
+        sys.argv.remove("--json-log")
+
+    setup_logging(json_log=json_log)
 
     if len(sys.argv) < 2:
         print(__doc__)

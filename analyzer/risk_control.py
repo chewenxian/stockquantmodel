@@ -7,6 +7,7 @@
 """
 import logging
 import math
+import random
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 
@@ -463,15 +464,97 @@ class RiskController:
                 risk_level = "极高"
                 advice = "风险极高，建议观望"
 
+            # ── 4. VaR 分析 ──
+            var_result = self.calculate_var(code, days=252, confidence=0.95)
+            if var_result.get("parametric_var") is not None:
+                details["var_parametric"] = var_result["parametric_var"]
+                details["var_historical"] = var_result["historical_var"]
+                details["var_parametric_annual"] = var_result.get("parametric_var_annual")
+
+                # VaR 因子：如果日 VaR > 3%，提高风险分
+                daily_var = var_result["parametric_var"]
+                if daily_var > 0.04:
+                    components["var_risk"] = 80
+                elif daily_var > 0.03:
+                    components["var_risk"] = 60
+                elif daily_var > 0.02:
+                    components["var_risk"] = 40
+                else:
+                    components["var_risk"] = 25
+
+            # ── 5. CVaR 分析 ──
+            cvar_result = self.calculate_cvar(code, days=252, confidence=0.95)
+            if cvar_result.get("cvar") is not None:
+                details["cvar"] = cvar_result["cvar"]
+                cvar_val = cvar_result["cvar"]
+                if cvar_val > 0.06:
+                    components["cvar_risk"] = 85
+                elif cvar_val > 0.04:
+                    components["cvar_risk"] = 65
+                elif cvar_val > 0.025:
+                    components["cvar_risk"] = 45
+                else:
+                    components["cvar_risk"] = 30
+
+            # ── 6. GARCH 波动率预测 ──
+            prices = self._get_price_series(code, max_points=126)
+            if len(prices) >= 20:
+                log_returns = []
+                for i in range(1, len(prices)):
+                    if prices[i - 1] > 0 and prices[i] > 0:
+                        log_returns.append(math.log(prices[i] / prices[i - 1]))
+
+                if len(log_returns) >= 20:
+                    garch_result = self.predict_garch_volatility(log_returns, forecast_days=5)
+                    if garch_result.get("current_vol") is not None:
+                        details["garch_current_vol"] = garch_result["current_vol"]
+                        details["garch_long_term_vol"] = garch_result["long_term_vol"]
+                        details["garch_forecast"] = garch_result["forecast"]
+
+                        # GARCH 趋势：如果预测波动率上升，增加风险分
+                        if len(garch_result["forecast"]) >= 3:
+                            forecast_trend = (
+                                garch_result["forecast"][-1] / garch_result["forecast"][0]
+                            )
+                            details["garch_trend"] = round(forecast_trend, 4)
+                            if forecast_trend > 1.15:
+                                components["garch_trend_risk"] = 75
+                            elif forecast_trend > 1.08:
+                                components["garch_trend_risk"] = 55
+                            else:
+                                components["garch_trend_risk"] = 30
+
+            # 综合风险评分（包含 VaR/CVaR/GARCH）
+            weights = {
+                "volatility_risk": 0.30,
+                "price_risk": 0.20,
+                "flow_risk": 0.20,
+                "var_risk": 0.10,
+                "cvar_risk": 0.10,
+                "garch_trend_risk": 0.10,
+            }
+
+            risk_score = sum(
+                components.get(k, 50) * w
+                for k, w in weights.items()
+            )
+
             # 如果波动率很高，加上额外提示
             if volatility and volatility > 0.40:
-                advice += f"（波动率 {volatility*100:.1f}%）"
+                advice += f"（波动率 {volatility*100:.1f}%，VaR 预警）"
+
+            # 如果 VaR/CVaR 很高，附加风险提示
+            if details.get("var_historical") and details["var_historical"] > 0.035:
+                advice += f" 历史VaR: {details['var_historical']*100:.2f}%/日"
 
             return {
                 "risk_level": risk_level,
                 "risk_score": round(risk_score, 1),
                 "components": components,
                 "details": details,
+                "var_analysis": var_result if var_result.get("parametric_var") else None,
+                "cvar_analysis": cvar_result if cvar_result.get("cvar") else None,
+                "garch_analysis": garch_result if garch_result.get("current_vol") else None,
                 "advice": advice,
             }
 
@@ -479,6 +562,442 @@ class RiskController:
             logger.error(f"综合风险评估异常 ({code}): {e}")
 
         return default
+
+    # ──────────────────────────────────────────
+    # VaR 计算
+    # ──────────────────────────────────────────
+
+    def calculate_var(self, code: str, days: int = 252, confidence: float = 0.95) -> Dict:
+        """
+        计算 Value at Risk（风险价值）
+
+        - 参数法（正态分布假设）
+        - 历史模拟法
+
+        Args:
+            code: 股票代码
+            days: 计算周期（交易日数）
+            confidence: 置信水平，默认0.95
+
+        Returns:
+            {
+                "parametric_var": 0.0321,    # 参数法VaR（百分比）
+                "historical_var": 0.0285,    # 历史模拟法VaR（百分比）
+                "daily_volatility": 0.025,   # 日波动率
+                "confidence": 0.95,
+                "days": 252,
+            }
+        """
+        result = {
+            "parametric_var": None,
+            "historical_var": None,
+            "daily_volatility": None,
+            "confidence": confidence,
+            "days": days,
+        }
+
+        try:
+            prices = self._get_price_series(code, max_points=days + 10)
+            if not prices or len(prices) < 10:
+                logger.warning(f"{code} 价格数据不足，无法计算 VaR")
+                return result
+
+            # 计算日对数收益率
+            log_returns = []
+            for i in range(1, len(prices)):
+                if prices[i - 1] > 0 and prices[i] > 0:
+                    log_returns.append(math.log(prices[i] / prices[i - 1]))
+
+            if len(log_returns) < 5:
+                return result
+
+            # 日波动率
+            mean_r = sum(log_returns) / len(log_returns)
+            variance = sum((r - mean_r) ** 2 for r in log_returns) / (len(log_returns) - 1)
+            daily_vol = math.sqrt(variance)
+            result["daily_volatility"] = round(daily_vol, 6)
+
+            # 1. 参数法 VaR（正态分布假设）
+            # VaR = z_score * sigma，z(0.95)=1.645, z(0.99)=2.326
+            z_scores = {0.90: 1.282, 0.95: 1.645, 0.99: 2.326}
+            z = z_scores.get(confidence, 1.645)
+            parametric_var = z * daily_vol
+            result["parametric_var"] = round(parametric_var, 6)
+
+            # 2. 历史模拟法 VaR
+            sorted_returns = sorted(log_returns)
+            n = len(sorted_returns)
+            idx = int(n * (1 - confidence))
+            idx = max(0, min(idx, n - 1))
+            historical_var = abs(sorted_returns[idx])
+            result["historical_var"] = round(historical_var, 6)
+
+            # 年化 VaR
+            result["parametric_var_annual"] = round(parametric_var * math.sqrt(252), 6)
+            result["historical_var_annual"] = round(historical_var * math.sqrt(252), 6)
+
+        except Exception as e:
+            logger.error(f"VaR 计算异常 ({code}): {e}")
+
+        return result
+
+    def calculate_cvar(self, code: str, days: int = 252, confidence: float = 0.95) -> Dict:
+        """
+        计算 Conditional VaR（条件VaR / 期望尾损）
+
+        CVaR = E[loss | loss > VaR]
+        即超过 VaR 的尾部损失的平均值
+
+        Args:
+            code: 股票代码
+            days: 计算周期
+            confidence: 置信水平
+
+        Returns:
+            {
+                "cvar": 0.045,                # CVaR（百分比）
+                "var_at_confidence": 0.032,   # 对应置信水平的 VaR
+                "tail_count": 10,             # 尾部分布数量
+                "confidence": 0.95,
+            }
+        """
+        result = {
+            "cvar": None,
+            "var_at_confidence": None,
+            "tail_count": 0,
+            "confidence": confidence,
+        }
+
+        try:
+            prices = self._get_price_series(code, max_points=days + 10)
+            if not prices or len(prices) < 10:
+                logger.warning(f"{code} 价格数据不足，无法计算 CVaR")
+                return result
+
+            # 计算日收益率
+            returns = []
+            for i in range(1, len(prices)):
+                if prices[i - 1] > 0 and prices[i] > 0:
+                    r = (prices[i] - prices[i - 1]) / prices[i - 1]
+                    returns.append(r)
+
+            if len(returns) < 5:
+                return result
+
+            sorted_returns = sorted(returns)
+            n = len(sorted_returns)
+            idx = int(n * (1 - confidence))
+            idx = max(0, min(idx, n - 1))
+
+            var_val = abs(sorted_returns[idx])
+            result["var_at_confidence"] = round(var_val, 6)
+
+            # CVaR：所有超过 VaR 的损失的平均值
+            tail_returns = sorted_returns[:idx + 1] if idx > 0 else [sorted_returns[0]]
+            tail_returns = [abs(r) for r in tail_returns if r < 0]
+
+            if tail_returns:
+                cvar_val = sum(tail_returns) / len(tail_returns)
+                result["cvar"] = round(cvar_val, 6)
+                result["tail_count"] = len(tail_returns)
+
+        except Exception as e:
+            logger.error(f"CVaR 计算异常 ({code}): {e}")
+
+        return result
+
+    # ──────────────────────────────────────────
+    # GARCH(1,1) 波动率预测
+    # ──────────────────────────────────────────
+
+    def predict_garch_volatility(self, daily_returns: List[float],
+                                  forecast_days: int = 5) -> Dict:
+        """
+        GARCH(1,1) 模型预测波动率
+
+        纯 Python 实现（无需外部库）
+        GARCH(1,1): sigma_t^2 = omega + alpha * eps_{t-1}^2 + beta * sigma_{t-1}^2
+
+        Args:
+            daily_returns: 日收益率序列
+            forecast_days: 预测未来天数，默认5天
+
+        Returns:
+            {
+                "current_vol": 0.025,           # 当前波动率
+                "forecast": [0.026, 0.027, ...], # 未来 forecast_days 天波动率
+                "long_term_vol": 0.023,          # 长期均值波动率
+                "alpha": 0.15,                    # GARCH alpha 参数
+                "beta": 0.80,                     # GARCH beta 参数
+                "omega": 0.00001,                 # GARCH omega 参数
+                "converged": True,                # 是否收敛
+            }
+        """
+        result = {
+            "current_vol": None,
+            "forecast": [],
+            "long_term_vol": None,
+            "alpha": None,
+            "beta": None,
+            "omega": None,
+            "converged": False,
+        }
+
+        try:
+            if not daily_returns or len(daily_returns) < 10:
+                logger.warning("收益率数据不足，无法拟合 GARCH(1,1)")
+                return result
+
+            n = len(daily_returns)
+
+            # 1. 初始参数估计
+            # 使用样本方差作为初始长期方差
+            mean_r = sum(daily_returns) / n
+            sample_var = sum((r - mean_r) ** 2 for r in daily_returns) / (n - 1)
+            long_term_var = sample_var
+
+            # 2. GARCH(1,1) 参数估计（MLE 近似）
+            # 典型参数范围：alpha in [0.05, 0.2], beta in [0.75, 0.95], alpha+beta < 1
+            # 使用简单网格搜索
+            best_ll = -float("inf")
+            best_params = (0.1, 0.85, 0.00001 * sample_var)
+
+            omega_base = 0.05 * sample_var
+            for alpha in [0.05, 0.08, 0.10, 0.12, 0.15, 0.18, 0.20]:
+                for beta in [0.75, 0.78, 0.80, 0.82, 0.85, 0.88, 0.90, 0.92, 0.95]:
+                    if alpha + beta >= 1.0:
+                        continue
+                    omega = sample_var * (1 - alpha - beta)
+                    if omega <= 0:
+                        continue
+
+                    # 计算条件方差序列
+                    sigma2 = [sample_var]
+                    for t in range(1, n):
+                        eps2 = daily_returns[t - 1] ** 2
+                        s2 = omega + alpha * eps2 + beta * sigma2[-1]
+                        sigma2.append(s2)
+
+                    # 对数似然（高斯）
+                    log_likelihood = 0.0
+                    for t in range(1, n):
+                        if sigma2[t] > 0:
+                            log_likelihood += -0.5 * (
+                                math.log(2 * math.pi) + math.log(sigma2[t]) +
+                                daily_returns[t] ** 2 / sigma2[t]
+                            )
+
+                    if log_likelihood > best_ll:
+                        best_ll = log_likelihood
+                        best_params = (alpha, beta, omega)
+
+            alpha, beta, omega = best_params
+            result["alpha"] = round(alpha, 4)
+            result["beta"] = round(beta, 4)
+            result["omega"] = round(omega, 8)
+            result["converged"] = True
+
+            # 3. 计算当前波动率
+            sigma2 = [sample_var]
+            for t in range(1, n):
+                eps2 = daily_returns[t - 1] ** 2
+                s2 = omega + alpha * eps2 + beta * sigma2[-1]
+                sigma2.append(s2)
+
+            current_var = sigma2[-1]
+            current_vol = math.sqrt(current_var)
+            result["current_vol"] = round(current_vol, 6)
+
+            # 4. 长期均衡波动率
+            long_term_var = omega / (1 - alpha - beta) if (alpha + beta) < 1 else sample_var
+            result["long_term_vol"] = round(math.sqrt(long_term_var), 6)
+
+            # 5. 预测未来波动率
+            # sigma^2_{t+k} = omega + (alpha+beta) * sigma^2_{t+k-1}
+            forecast_vars = [current_var]
+            for k in range(1, forecast_days + 1):
+                f_var = omega + (alpha + beta) * forecast_vars[-1]
+                forecast_vars.append(f_var)
+
+            result["forecast"] = [
+                round(math.sqrt(v), 6) for v in forecast_vars[1:]
+            ]
+
+        except Exception as e:
+            logger.error(f"GARCH 波动率预测异常: {e}")
+
+        return result
+
+    # ──────────────────────────────────────────
+    # 压力测试
+    # ──────────────────────────────────────────
+
+    def stress_test(self, code: str) -> Dict:
+        """
+        压力测试
+
+        场景:
+        - 大盘跌 -5%
+        - 大盘跌 -10%
+        - 个股跌停 (-10%)
+        - 熔断 (-7%)
+
+        Args:
+            code: 股票代码
+
+        Returns:
+            {
+                "code": "600519",
+                "name": "贵州茅台",
+                "current_price": 1800.0,
+                "scenarios": [
+                    {"name": "大盘跌5%", "expected_loss_pct": -0.05, "expected_loss_price": ..., "prob": "中"},
+                    ...
+                ],
+                "max_loss_scenario": "熔断(-7%)",
+                "max_loss_pct": -0.07,
+                "volatility_context": 0.25,
+            }
+        """
+        result = {
+            "code": code,
+            "name": "",
+            "current_price": None,
+            "scenarios": [],
+            "max_loss_scenario": "",
+            "max_loss_pct": None,
+            "volatility_context": None,
+        }
+
+        try:
+            # 获取名称和当前价格
+            try:
+                from analyzer.ner_extractor import A_SHARE_STOCKS
+                result["name"] = A_SHARE_STOCKS.get(code, "")
+            except Exception:
+                pass
+
+            current_price = self._get_latest_price(code)
+            result["current_price"] = current_price
+
+            # 获取波动率作为上下文
+            volatility = self.calculate_volatility(code, 60)
+            result["volatility_context"] = volatility
+
+            # 获取 Beta（简化为使用波动率对比估计）
+            # 使用当前个股波动率 vs 市场平均波动率（假设20%）作为 Beta 代理
+            beta_estimate = 1.0
+            if volatility and volatility > 0:
+                market_vol = 0.20  # 假设市场年化波动率20%
+                beta_estimate = volatility / market_vol
+
+            # 定义测试场景
+            scenarios = [
+                {
+                    "name": "大盘跌5%",
+                    "market_change": -0.05,
+                    "shock_type": "系统性",
+                    "prob": "中",
+                    "description": "市场整体回调5%，受宏观因素驱动",
+                },
+                {
+                    "name": "大盘跌10%",
+                    "market_change": -0.10,
+                    "shock_type": "系统性",
+                    "prob": "低",
+                    "description": "市场大幅下挫10%，金融危机级别",
+                },
+                {
+                    "name": "熔断(-7%)",
+                    "market_change": -0.07,
+                    "shock_type": "系统性",
+                    "prob": "低",
+                    "description": "触发熔断机制，市场恐慌情绪蔓延",
+                },
+                {
+                    "name": "个股跌停(-10%)",
+                    "market_change": -0.10,
+                    "shock_type": "个股",
+                    "prob": "中低",
+                    "description": "个股因利空消息跌停",
+                },
+                {
+                    "name": "板块回调(-8%)",
+                    "market_change": -0.08 * beta_estimate,
+                    "shock_type": "板块",
+                    "prob": "中",
+                    "description": "所属板块因政策或行业利空回调",
+                },
+                {
+                    "name": "流动性冲击(-15%)",
+                    "market_change": -0.15,
+                    "shock_type": "极端",
+                    "prob": "极低",
+                    "description": "极端流动性危机，连续跌停",
+                },
+            ]
+
+            for sc in scenarios:
+                change_pct = sc["market_change"]
+                expected_loss_pct = change_pct  # 简单模型：个股跟随市场
+
+                # 如果有个股特定场景，加大损失
+                if sc["shock_type"] == "个股":
+                    expected_loss_pct = -0.10  # 跌停
+                elif sc["shock_type"] == "极端":
+                    expected_loss_pct = -0.15  # 极端情况
+
+                expected_loss_price = None
+                if current_price and current_price > 0:
+                    expected_loss_price = round(current_price * (1 + expected_loss_pct), 2)
+
+                # 根据波动率调整
+                if volatility and volatility > 0.40 and sc["prob"] != "极低":
+                    sc["prob"] = {
+                        "低": "中低",
+                        "中低": "中",
+                        "中": "中高",
+                    }.get(sc["prob"], "中")
+                    expected_loss_pct *= 1.2  # 高波动下损失放大
+
+                result["scenarios"].append({
+                    "name": sc["name"],
+                    "expected_loss_pct": round(expected_loss_pct, 4),
+                    "expected_loss_price": expected_loss_price,
+                    "prob": sc["prob"],
+                    "description": sc["description"],
+                    "shock_type": sc["shock_type"],
+                })
+
+            # 找出最大损失场景
+            max_loss = None
+            max_loss_name = ""
+            for sc in result["scenarios"]:
+                if max_loss is None or sc["expected_loss_pct"] < max_loss:
+                    max_loss = sc["expected_loss_pct"]
+                    max_loss_name = sc["name"]
+
+            result["max_loss_scenario"] = max_loss_name
+            result["max_loss_pct"] = max_loss
+
+            # 添加风险评估
+            if volatility:
+                vol_pct = volatility * 100
+                if vol_pct < 25:
+                    result["stress_risk"] = "低"
+                elif vol_pct < 40:
+                    result["stress_risk"] = "中"
+                elif vol_pct < 60:
+                    result["stress_risk"] = "高"
+                else:
+                    result["stress_risk"] = "极高"
+            else:
+                result["stress_risk"] = "未知"
+
+        except Exception as e:
+            logger.error(f"压力测试异常 ({code}): {e}")
+
+        return result
 
     # ──────────────────────────────────────────
     # 辅助方法

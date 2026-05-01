@@ -722,8 +722,9 @@ class Database:
             conn.commit()
             self._close(conn)
             return True
-        except Exception:
-            return False
+        except Exception as e:
+            raise DatabaseError(f"插入政策新闻失败: {e}",
+                                details={"title": title[:50], "source": source})
 
     def insert_macro(self, indicator: str, value: float, unit: str = "",
                       release_date: str = None, source: str = "",
@@ -1308,9 +1309,9 @@ class Database:
             self._close(conn)
             return True
         except Exception as e:
-            logger = __import__('logging').getLogger(__name__)
             logger.error(f"保存分析结果失败 ({code}): {e}")
-            return False
+            raise DatabaseError(f"保存分析结果失败 ({code}): {e}",
+                                details={"code": code})
 
     def get_today_analysis(self) -> List[Dict]:
         """获取所有今日分析结果"""
@@ -1374,7 +1375,6 @@ class Database:
             self._close(conn)
             return True
         except Exception as e:
-            logger = __import__('logging').getLogger(__name__)
             logger.error(f"插入日K线失败 ({stock_code} {trade_date}): {e}")
             return False
 
@@ -1405,7 +1405,6 @@ class Database:
             result.reverse()
             return result
         except Exception as e:
-            logger = __import__('logging').getLogger(__name__)
             logger.error(f"获取历史K线失败 ({code}): {e}")
             return []
 
@@ -1435,6 +1434,5 @@ class Database:
             self._close(conn)
             return [dict(r) for r in rows]
         except Exception as e:
-            logger = __import__('logging').getLogger(__name__)
             logger.error(f"获取指定范围价格失败 ({code}): {e}")
             return []
