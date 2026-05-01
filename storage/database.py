@@ -262,7 +262,7 @@ class Database:
                 archived_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
-            -- 15. 回测信号记录
+            -- 15. 回测信号记录（无外键约束：回测表独立，可引用已删除的股票）
             CREATE TABLE IF NOT EXISTS backtest_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 stock_code TEXT NOT NULL,
@@ -271,12 +271,11 @@ class Database:
                 confidence REAL,
                 sentiment REAL,
                 price_at_signal REAL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(stock_code) REFERENCES stocks(code)
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_bts_stock_date ON backtest_signals(stock_code, signal_date DESC);
 
-            -- 16. 回测结果
+            -- 16. 回测结果（无外键约束）
             CREATE TABLE IF NOT EXISTS backtest_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 stock_code TEXT NOT NULL,
@@ -290,8 +289,7 @@ class Database:
                 sharpe_ratio REAL,
                 benchmark_return REAL,
                 alpha REAL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(stock_code) REFERENCES stocks(code)
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_btr_stock ON backtest_results(stock_code);
         """)
