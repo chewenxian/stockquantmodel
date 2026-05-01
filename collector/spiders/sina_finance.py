@@ -104,10 +104,12 @@ class SinaFinanceCollector(BaseCollector):
         """采集新浪财经滚动新闻"""
         count = 0
         # 新浪财经头条列表
+        # 新浪新闻API使用lid参数（2026已验证）
         urls = [
-            ("https://feed.mix.sina.com.cn/api/roll/get", "滚动新闻", {"pageid": 153, "num": 30}),
-            ("https://feed.mix.sina.com.cn/api/roll/get", "股市", {"pageid": 155, "num": 30}),
-            ("https://feed.mix.sina.com.cn/api/roll/get", "财经", {"pageid": 158, "num": 30}),
+            ("https://feed.mix.sina.com.cn/api/roll/get", "滚动新闻", {"lid": 153, "num": 30}),
+            ("https://feed.mix.sina.com.cn/api/roll/get", "股市", {"lid": 155, "num": 30}),
+            ("https://feed.mix.sina.com.cn/api/roll/get", "财经", {"lid": 158, "num": 30}),
+            ("https://feed.mix.sina.com.cn/api/roll/get", "产经", {"lid": 161, "num": 30}),
         ]
 
         for url, source_name, params in urls:
