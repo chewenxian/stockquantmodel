@@ -11,8 +11,10 @@
     python main.py analyze       # 分析所有自选股
     python main.py analyze 600519  # 分析指定股票
     python main.py analyze 600519 3  # 分析指定股票（近3天）
-    python main.py report        # 生成收盘晚报
-    python main.py report morning  # 生成盘前早报
+    python main.py report          # 生成收盘复盘+次日展望
+    python main.py report morning   # 生成盘前早报 (09:00)
+    python main.py report midday    # 生成午间速报 (12:00)
+    python main.py report closing   # 生成收盘复盘+次日展望 (15:30)
     python main.py api           # 启动 FastAPI 服务
     python main.py notify        # 触发推送（晚报+信号）
     python main.py history       # 拉取所有自选股历史K线
@@ -199,12 +201,15 @@ def cmd_report():
     if report_type == "morning":
         print("🌅 生成盘前早报...")
         report = gen.generate_morning_report()
-    elif report_type == "closing":
-        print("📊 生成收盘晚报...")
-        report = gen.generate_closing_report()
+    elif report_type == "midday":
+        print("☀️ 生成午间速报...")
+        report = gen.generate_midday_report()
+    elif report_type == "closing" or report_type == "outlook":
+        print("🔮 生成收盘复盘+次日展望...")
+        report = gen.generate_closing_with_outlook()
     else:
-        print(f"未知报告类型: {report_type}，使用收盘晚报")
-        report = gen.generate_closing_report()
+        print(f"未知报告类型: {report_type}，使用收盘复盘")
+        report = gen.generate_closing_with_outlook()
 
     if report:
         filepath = gen.save_report(report, report_type)

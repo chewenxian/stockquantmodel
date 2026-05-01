@@ -281,6 +281,281 @@ class ReportGenerator:
         return self._fallback_report("closing", stock_analyses, today)
 
     # ──────────────────────────────────────────
+    # 午间速报
+    # ──────────────────────────────────────────
+
+    def generate_midday_report(self) -> str:
+        """
+        生成午间速报（交易日 12:00）
+
+        内容：
+        1. 上午涨跌分布
+        2. 半日热点个股
+        3. 下午关注
+
+        Returns:
+            Markdown 格式午报文本
+        """
+        today = date.today()
+        if not self.is_trading_day(today):
+            logger.info("非交易日，跳过午报")
+            return ""
+
+        logger.info(f"生成午间速报 ({today.isoformat()})")
+
+        if not self.analyzer:
+            return self._fallback_report("closing")  # 复用兜底模板
+
+        stock_analyses = self.analyzer.analyze_all_stocks()
+        if not stock_analyses:
+            return "暂无分析数据。"
+
+        stock_analyses.sort(key=lambda x: abs(x.get("avg_sentiment", 0)), reverse=True)
+
+        today_str = today.strftime("%Y年%m月%d日")
+        lines = [
+            f"# ☀️ 午间速报 | {today_str}\n",
+        ]
+
+        # 建议分布
+        suggestions = {}
+        for s in stock_analyses:
+            sug = s.get("suggestion", "持有")
+            suggestions[sug] = suggestions.get(sug, 0) + 1
+
+        bullish = suggestions.get("强烈买入", 0) + suggestions.get("买入", 0) + suggestions.get("关注", 0)
+        bearish = suggestions.get("强烈卖出", 0) + suggestions.get("卖出", 0) + suggestions.get("回避", 0)
+
+        lines.append(f"📈 **看多**: {bullish}只  |  📉 **看空**: {bearish}只  |  ⚪ **中性**: {len(stock_analyses)-bullish-bearish}只\n")
+        lines.append("\n")
+
+        # 半日热点（情绪最强前5）
+        top_bullish = [s for s in stock_analyses if s.get("avg_sentiment", 0) > 0.1][:5]
+        if top_bullish:
+            lines.append("## 🟢 半日强势股\n")
+            for s in top_bullish:
+                name = s.get("name", "")
+                code = s.get("code", "")
+                sentiment = s.get("avg_sentiment", 0)
+                suggestion = s.get("suggestion", "")
+                lines.append(f"- **{name}**({code}) | 情绪: {sentiment:.2f} | {suggestion}\n")
+            lines.append("\n")
+
+        # 半日弱势（情绪最弱前5）
+        top_bearish = [s for s in stock_analyses if s.get("avg_sentiment", 0) < -0.1][-5:]
+        top_bearish.reverse()
+        if top_bearish:
+            lines.append("## 🔴 半日弱势股\n")
+            for s in top_bearish:
+                name = s.get("name", "")
+                code = s.get("code", "")
+                sentiment = s.get("avg_sentiment", 0)
+                suggestion = s.get("suggestion", "")
+                lines.append(f"- **{name}**({code}) | 情绪: {sentiment:.2f} | {suggestion}\n")
+            lines.append("\n")
+
+        # 置信度最高
+        top_confidence = sorted(stock_analyses, key=lambda x: x.get("confidence", 0), reverse=True)[:3]
+        lines.append("## 🎯 高置信度信号\n")
+        for s in top_confidence:
+            name = s.get("name", "")
+            code = s.get("code", "")
+            confidence = s.get("confidence", 0)
+            suggestion = s.get("suggestion", "")
+            lines.append(f"- **{name}**({code}) | 置信度: {confidence:.0%} | {suggestion}\n")
+        lines.append("\n---\n")
+        lines.append(f"*⏰ {datetime.now().strftime('%H:%M')} · 午间速报*\n")
+
+        return "".join(lines)
+
+    # ──────────────────────────────────────────
+    # 收盘复盘 + 次日展望
+    # ──────────────────────────────────────────
+
+    def generate_closing_with_outlook(self) -> str:
+        """
+        生成收盘复盘 + 次日板块/个股展望
+
+        内容：
+        1. 今日整体回顾
+        2. 板块强弱分析（通过知识图谱按行业分组）
+        3. 重点个股分析
+        4. 次日走强/走弱预判
+        5. 操作策略
+
+        Returns:
+            Markdown 格式报告
+        """
+        today = date.today()
+        if not self.is_trading_day(today):
+            logger.info("非交易日，跳过收盘复盘")
+            return ""
+
+        logger.info(f"生成收盘复盘+次日展望 ({today.isoformat()})")
+
+        if not self.analyzer:
+            return self._fallback_report("closing")
+
+        stock_analyses = self.analyzer.analyze_all_stocks()
+        if not stock_analyses:
+            return "今日暂无分析数据。"
+
+        today_str = today.strftime("%Y年%m月%d日")
+
+        # ── 1. 按行业分组 ──
+        try:
+            from analyzer.knowledge_graph import FinancialKnowledgeGraph
+            kg = FinancialKnowledgeGraph()
+            # sectors: 从 stocks.csv 的 industry 字段读取
+        except Exception:
+            kg = None
+
+        # 获取每只股票的行业（从数据库读）
+        stock_industry = {}
+        if self.db:
+            try:
+                conn = self.db._connect()
+                rows = conn.execute("SELECT code, industry FROM stocks").fetchall()
+                for r in rows:
+                    ind = r["industry"] or ""
+                    if ind:
+                        stock_industry[r["code"]] = ind
+                conn.close()
+            except Exception:
+                pass
+
+        # 按行业分组统计
+        sector_groups = {}  # sector -> {stocks, avg_sentiment, bullish_count, bearish_count}
+        for s in stock_analyses:
+            code = s.get("code", "")
+            industry = stock_industry.get(code, "其他")
+            sentiment = s.get("avg_sentiment", 0) or 0
+            suggestion = s.get("suggestion", "持有")
+            confidence = s.get("confidence", 0) or 0
+
+            if industry not in sector_groups:
+                sector_groups[industry] = {
+                    "stocks": [],
+                    "sentiments": [],
+                    "bullish": 0,
+                    "bearish": 0,
+                    "neutral": 0,
+                }
+            g = sector_groups[industry]
+            g["stocks"].append(s)
+            g["sentiments"].append(sentiment)
+            if suggestion in ("强烈买入", "买入", "关注"):
+                g["bullish"] += 1
+            elif suggestion in ("强烈卖出", "卖出", "回避"):
+                g["bearish"] += 1
+            else:
+                g["neutral"] += 1
+
+        # 计算各行业平均情绪
+        sector_stats = []
+        for name, g in sector_groups.items():
+            avg_s = sum(g["sentiments"]) / max(len(g["sentiments"]), 1)
+            total = g["bullish"] + g["bearish"] + g["neutral"]
+            sector_stats.append({
+                "name": name,
+                "avg_sentiment": avg_s,
+                "count": len(g["stocks"]),
+                "bullish_ratio": g["bullish"] / max(total, 1),
+                "bearish_ratio": g["bearish"] / max(total, 1),
+                "stocks": g["stocks"],
+            })
+
+        # 排序：情绪从高到低
+        sector_stats.sort(key=lambda x: x["avg_sentiment"], reverse=True)
+
+        # ── 构建报告 ──
+        lines = [
+            f"# 📊 收盘复盘 | {today_str}\n",
+            f"---\n",
+        ]
+
+        # 整体情绪
+        all_sentiments = [s.get("avg_sentiment", 0) or 0 for s in stock_analyses]
+        avg_all = sum(all_sentiments) / max(len(all_sentiments), 1)
+        market_icon = "🟢" if avg_all > 0.1 else ("🔴" if avg_all < -0.1 else "⚪")
+        total = len(stock_analyses)
+        bullish_count = sum(1 for s in stock_analyses if s.get("avg_sentiment", 0) > 0.1)
+        bearish_count = sum(1 for s in stock_analyses if s.get("avg_sentiment", 0) < -0.1)
+        lines.append(f"**整体情绪**: {market_icon} {avg_all:.2f}  |  🟢 偏多: {bullish_count}只  |  🔴 偏空: {bearish_count}只  |  总数: {total}只\n")
+        lines.append("\n")
+
+        # ── 2. 板块强弱 ──
+        strong_sectors = [s for s in sector_stats if s["avg_sentiment"] > 0.05][:5]
+        weak_sectors = [s for s in sector_stats if s["avg_sentiment"] < -0.05][-5:]
+        weak_sectors.reverse()
+
+        if strong_sectors:
+            lines.append("## 🟢 今日强势板块\n")
+            for st in strong_sectors:
+                lines.append(f"- **{st['name']}** | 情绪: {st['avg_sentiment']:.2f} | 看多率: {st['bullish_ratio']:.0%} ({st['count']}只)\n")
+            lines.append("\n")
+
+        if weak_sectors:
+            lines.append("## 🔴 今日弱势板块\n")
+            for st in weak_sectors:
+                lines.append(f"- **{st['name']}** | 情绪: {st['avg_sentiment']:.2f} | 看空率: {st['bearish_ratio']:.0%} ({st['count']}只)\n")
+            lines.append("\n")
+
+        # ── 3. 重点个股 ──
+        # 按置信度排序前5
+        top_sorted = sorted(stock_analyses, key=lambda x: x.get("confidence", 0), reverse=True)[:5]
+        lines.append("## 📈 重点个股\n")
+        for s in top_sorted:
+            name = s.get("name", "")
+            code = s.get("code", "")
+            sentiment = s.get("avg_sentiment", 0)
+            suggestion = s.get("suggestion", "")
+            confidence = s.get("confidence", 0)
+            icon = "🟢" if sentiment > 0.1 else ("🔴" if sentiment < -0.1 else "⚪")
+            lines.append(f"- {icon} **{name}**({code}) | 情绪: {sentiment:.2f} | {suggestion} | 置信度: {confidence:.0%}\n")
+            summary = (s.get("summary") or "")[:80]
+            if summary:
+                lines.append(f"  └ {summary}\n")
+        lines.append("\n")
+
+        # ── 4. 次日走强/走弱预判 ──
+        lines.append("## 🔮 次日展望\n")
+
+        # 走强板块：今日强势 + 看多率高
+        outlook_strong = strong_sectors[:3]
+        if outlook_strong:
+            lines.append("### ✅ 预计走强\n")
+            for st in outlook_strong:
+                # 从该板块挑置信度最高的股票
+                top_stocks = sorted(st["stocks"], key=lambda x: x.get("confidence", 0), reverse=True)[:2]
+                stock_strs = [f"{s.get('name','')}({s.get('code','')})" for s in top_stocks]
+                lines.append(f"- **{st['name']}** → {'、'.join(stock_strs)}\n")
+            lines.append("\n")
+
+        # 走弱板块：今日弱势 + 看空率高
+        outlook_weak = weak_sectors[:3]
+        if outlook_weak:
+            lines.append("### ⚠️ 预计走弱\n")
+            for st in outlook_weak:
+                top_stocks = sorted(st["stocks"], key=lambda x: x.get("sentiment", 0))[:2]
+                stock_strs = [f"{s.get('name','')}({s.get('code','')})" for s in top_stocks]
+                lines.append(f"- **{st['name']}** → {'、'.join(stock_strs)}\n")
+            lines.append("\n")
+
+        # 操作策略
+        lines.append("### 📋 操作策略\n")
+        if avg_all > 0.1:
+            lines.append("市场情绪偏暖，可关注强势板块回调机会。\n")
+        elif avg_all < -0.1:
+            lines.append("市场情绪偏弱，建议控制仓位、观望为主。\n")
+        else:
+            lines.append("市场情绪中性，结构性机会为主，精选个股。\n")
+        lines.append("\n---\n")
+        lines.append(f"*⏰ {datetime.now().strftime('%H:%M')} · 次日展望由 AI 生成，仅供参考*\n")
+
+        return "".join(lines)
+
+    # ──────────────────────────────────────────
     # 导出
     # ──────────────────────────────────────────
 
