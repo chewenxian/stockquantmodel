@@ -682,8 +682,227 @@ comparison = analyzer.compare_stocks_impact()
 
 ---
 
+## 十一、技术指标 + 信号分级 + 动态风控说明（v5.0 新增）
 
-## 十一、回测模块说明（v5.0）
+将技术面分析（RSI/均线/布林带/MACD）与基本面新闻情绪深度整合，实现信号分级过滤和动态仓位管理。
+
+### 增强分析流程
+
+```
+┌──────────────────────┐
+│  读取数据              │  ← 新闻/行情/资金/板块
+└────────┬─────────────┘
+         │
+┌────────▼─────────────┐
+│  技术指标计算          │  ← technical.py
+│  - RSI(14)            │
+│  - 均线(5/10/20/30/60)│
+│  - 布林带(20,2)       │
+│  - MACD(12,26,9)     │
+└────────┬─────────────┘
+         │
+┌────────▼─────────────┐
+│  信号分级与过滤        │  ← signal_grader.py
+│  - 多因子共振评分      │
+│  - S/A/B/C/无效 五级  │
+│  - 冲突检测           │
+└────────┬─────────────┘
+         │
+┌────────▼─────────────┐
+│  动态风控              │  ← risk_control.py
+│  - 波动率计算          │
+│  - 仓位建议            │
+│  - 止损预警            │
+│  - 综合风险评级        │
+└────────┬─────────────┘
+         │
+┌────────▼─────────────┐
+│  impact_model.py 升级  │
+│  (集成 technical_score │
+│   + signal_level 字段)  │
+└──────────────────────┘
+```
+
+### 模块说明
+
+#### `analyzer/technical.py` — 技术指标计算（v5.0 新增）
+
+纯 Python 实现的技术指标计算器，从 `market_snapshots` 表获取历史收盘价序列。
+
+| 方法 | 功能 |
+|------|------|
+| `calculate_rsi(prices, period=14)` | RSI计算（标准法） |
+| `calculate_rsi_smoothed(prices, period=14)` | RSI计算（Wilder平滑法） |
+| `calculate_ma(prices, period)` | 简单移动均线 SMA |
+| `calculate_ema(prices, period)` | 指数移动均线 EMA |
+| `calculate_all_ma(prices)` | 多周期均线（MA5/10/20/30/60） |
+| `calculate_bollinger(prices, period=20)` | 布林带（上轨/中轨/下轨/带宽/位置） |
+| `calculate_macd(prices)` | MACD计算（DIF/DEA/MACD柱） |
+| `get_all_indicators(code)` | 从数据库自动获取并计算所有指标 |
+
+**输出示例：**
+```python
+ti = TechnicalIndicator(db)
+result = ti.get_all_indicators("300750")
+# {
+#   "code": "300750",
+#   "price": 245.50,
+#   "rsi": 32.15,
+#   "rsi_signal": "超卖",
+#   "ma": {"ma5": 240.0, "ma10": 238.5, ...},
+#   "price_vs_ma": "短期向上突破",
+#   "bollinger": {"upper": 260, "middle": 240, "lower": 220, "position": 0.15},
+#   "macd": {"dif": 0.5, "dea": 0.2, "macd": 0.6},
+#   "macd_signal": "金叉",
+# }
+```
+
+#### `analyzer/signal_grader.py` — 信号分级系统（v5.0 新增）
+
+基于多因子共振的信号过滤与分级引擎。
+
+| 方法 | 功能 |
+|------|------|
+| `grade_signal(stock_code, news_sentiment, tech_data, money_flow, sector_heat)` | 综合评估信号等级 |
+| `is_signal(grade_result)` | 是否有有效信号 |
+| `is_strong_signal(grade_result)` | 是否为强信号（S/A级） |
+| `summarize(grade_result)` | 生成信号摘要文本 |
+
+**信号级别定义：**
+
+| 级别 | 条件 | 含义 |
+|------|------|------|
+| 🔴🔴 S级 | 高分(≥4.0) + 多因子共振 + 方向一致 | 强烈信号，多重因子确认 |
+| 🔴 A级 | 高分(≥2.5) + 2个以上活跃因子 | 强信号，主力因子支持 |
+| 🟡 B级 | 中等(≥1.0) + 单一因子明确 | 中等信号，可参考 |
+| 🟢 C级 | 微弱(≥0.3) | 弱信号，需谨慎 |
+| ⚪ 无效 | 无明显信号 | 不构成交易依据 |
+
+**分级因子：**
+1. 新闻情绪（30%权重）
+2. 技术指标（30%权重）— RSI超买超卖 + 均线排列 + MACD金叉死叉 + 布林带位置
+3. 资金流向（25%权重）— 主力净流入比例
+4. 板块热度（15%权重）
+
+**冲突检测：**
+- 情绪与技术面冲突 → 信号减半
+- 情绪与资金流向冲突 → 生成预警
+- RSI超买 + 利好情绪 → 追涨风险警告
+- MACD死叉 + 利好情绪 → 短期风险警告
+
+#### `analyzer/risk_control.py` — 动态风控（v5.0 新增）
+
+波动率计算、仓位建议、止损预警、综合风险评级。
+
+| 方法 | 功能 |
+|------|------|
+| `calculate_volatility(code, days=20)` | 年化历史波动率（对数收益率法） |
+| `calculate_simple_volatility(code, days=20)` | 简化波动率（涨跌幅绝对值法） |
+| `get_position_advice(volatility)` | 基于波动率的仓位建议 |
+| `check_stop_loss(code, entry_price)` | 止损检查（含动态止损价） |
+| `get_risk_level(code)` | 综合风险评级（0~100分） |
+| `suggest_stop_loss_strategy(code, entry_price)` | 止损策略建议（严格/标准/宽松/ATR） |
+
+**仓位建议规则：**
+
+| 波动率 | 仓位 | 风险等级 |
+|--------|------|---------|
+| < 20% | 正常仓位 (80-100%) | 低 |
+| 20-25% | 偏重仓位 (60-80%) | 低 |
+| 25-35% | 半仓 (40-60%) | 中 |
+| 35-50% | 轻仓 (20-40%) | 高 |
+| > 50% | 观望 (0-20%) | 极高 |
+
+**止损策略：**
+- 严格止损：0.5倍波动率（短线）
+- 标准止损：0.8倍波动率（波段）
+- 宽松止损：1.2倍波动率（趋势）
+- ATR止损：2倍平均真实波幅（技术交易）
+
+**综合风险评级维度：**
+| 维度 | 权重 | 数据来源 |
+|------|------|---------|
+| 波动率风险 | 40% | 年化波动率 |
+| 价格位置风险 | 30% | 价格与均线偏离度 |
+| 资金流向风险 | 30% | 主力净流入 |
+
+#### `analyzer/impact_model.py` — v5.0 升级说明
+
+1. **新增 `tech_data` 参数**：接受 `TechnicalIndicator.get_all_indicators()` 输出
+2. **新增 `technical_score` 维度**：纳入综合评分（20%权重）
+3. **新增 `signal_level` 输出字段**：S/A/B/C/无效 信号分级
+4. **权重调整**：情感 (30%) > 技术 (20%) > 板块 (15%) > 数量(10%) > 波动(10%)
+5. **`is_significant()` 增强**：同时判断信号级别
+
+**使用示例：**
+```python
+from analyzer.technical import TechnicalIndicator
+from analyzer.signal_grader import SignalGrader
+from analyzer.risk_control import RiskController
+from analyzer.impact_model import ImpactModel
+
+# 1. 获取技术指标
+ti = TechnicalIndicator(db)
+tech = ti.get_all_indicators("300750")
+print(f"RSI: {tech['rsi']}, MACD: {tech['macd_signal']}")
+
+# 2. 信号分级
+grader = SignalGrader(db)
+signal = grader.grade_signal(
+    stock_code="300750",
+    news_sentiment=0.72,
+    tech_data=tech,
+    money_flow={"main_net": 50000000, "total_amount": 500000000},
+    sector_heat=0.75,
+)
+print(f"信号级别: {signal['level']}")
+print(f"理由: {signal['reasons']}")
+print(f"警告: {signal['warnings']}")
+
+# 3. 动态风控
+rc = RiskController(db)
+vol = rc.calculate_volatility("300750")
+position = rc.get_position_advice(vol)
+print(f"建议仓位: {position['position_level']}")
+
+stop_loss = rc.check_stop_loss("300750", entry_price=245.0)
+print(f"止损状态: {stop_loss['status']}")
+
+risk = rc.get_risk_level("300750")
+print(f"风险等级: {risk['risk_level']}")
+
+# 4. 升级后的影响评估
+model = ImpactModel(db)
+impact = model.calculate_impact_factor(
+    stock_code="300750",
+    sentiment=0.72,
+    news_count=15,
+    tech_data=tech,
+    sector_heat=0.7,
+)
+print(f"影响分: {impact['impact_score']}, 信号级: {impact['signal_level']}")
+```
+
+### 独立测试
+
+```bash
+# 测试技术指标
+python analyzer/technical.py
+
+# 测试信号分级
+python analyzer/signal_grader.py
+
+# 测试动态风控
+python analyzer/risk_control.py
+
+# 测试升级后的影响评估
+python analyzer/impact_model.py
+```
+
+---
+
+
+## 十二、回测模块说明（v5.0）
 
 ### `analyzer/backtest.py` — 策略回测引擎
 
@@ -744,4 +963,5 @@ streamlit run dashboard/app.py
 ✅ 分析模块已完成（NLP分析/情绪分析/交易建议/日报生成）v3.0
 ✅ AI 分析增强层已完成（NER/知识图谱/影响评估/推理链）v4.0
 ✅ 回测模块已完成（回测引擎 + Streamlit可视化看板）v5.0
+✅ 技术指标 + 信号分级 + 动态风控已完成（技术面融合）v5.0
 ⏳ 推送模块（待开发）
