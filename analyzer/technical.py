@@ -407,7 +407,8 @@ class TechnicalIndicator:
 
     def _get_price_series(self, code: str, max_points: int = 100) -> List[float]:
         """
-        从数据库获取股票收盘价序列
+        获取股票收盘价序列
+        优先从 daily_prices 表读取，数据不足时从API拉取并存入数据库
 
         Args:
             code: 股票代码
@@ -423,27 +424,46 @@ class TechnicalIndicator:
             return prices
 
         try:
-            conn = self.db._connect()
-            rows = conn.execute("""
-                SELECT price FROM market_snapshots
-                WHERE stock_code = ?
-                  AND price IS NOT NULL
-                  AND price > 0
-                ORDER BY snapshot_time ASC
-                LIMIT ?
-            """, (code, max_points)).fetchall()
+            # 优先从 daily_prices 表读取
+            rows = self.db.get_price_history(code, days=max_points)
+            prices = [r["close_price"] for r in rows
+                      if r.get("close_price") is not None and r["close_price"] > 0]
 
-            prices = [r["price"] for r in rows if r["price"] is not None and r["price"] > 0]
-
-            # 如果数据不够，尝试从 analysis 表获取历史数据（降序取）
+            # 如果 daily_prices 数据不足（少于20天），回退到 market_snapshots
             if len(prices) < 20:
+                logger.info(f"{code} daily_prices数据不足({len(prices)}条)，尝试从market_snapshots获取")
+                conn = self.db._connect()
                 rows2 = conn.execute("""
-                    SELECT llm_analysis FROM analysis
+                    SELECT price FROM market_snapshots
                     WHERE stock_code = ?
-                    ORDER BY date DESC LIMIT 1
-                """, (code,)).fetchall()
+                      AND price IS NOT NULL
+                      AND price > 0
+                    ORDER BY snapshot_time ASC
+                    LIMIT ?
+                """, (code, max_points)).fetchall()
+                conn.close()
 
-            conn.close()
+                prices2 = [r["price"] for r in rows2 if r["price"] is not None and r["price"] > 0]
+                if len(prices2) > len(prices):
+                    prices = prices2
+
+            # 如果仍不足20条，尝试从API拉取历史K线
+            if len(prices) < 20:
+                logger.info(f"{code} 本地数据仍不足({len(prices)}条)，尝试从API拉取历史日K线")
+                try:
+                    from collector.spiders.history_quotes import HistoryQuotesCollector
+                    collector = HistoryQuotesCollector(self.db)
+                    count = collector.collect_stock(code, limit=max_points)
+                    if count > 0:
+                        # 重新从 daily_prices 读取
+                        rows3 = self.db.get_price_history(code, days=max_points)
+                        prices = [r["close_price"] for r in rows3
+                                  if r.get("close_price") is not None and r["close_price"] > 0]
+                        logger.info(f"{code} 从API拉取 {count} 条K线后，现有 {len(prices)} 条")
+                except ImportError:
+                    logger.warning("HistoryQuotesCollector 不可用")
+                except Exception as e:
+                    logger.warning(f"{code} API拉取历史K线异常: {e}")
 
         except Exception as e:
             logger.warning(f"获取 {code} 价格序列异常: {e}")

@@ -15,6 +15,7 @@
     python main.py report morning  # 生成盘前早报
     python main.py api           # 启动 FastAPI 服务
     python main.py notify        # 触发推送（晚报+信号）
+    python main.py history       # 拉取所有自选股历史K线
 """
 import sys
 import os
@@ -251,6 +252,32 @@ def cmd_notify():
     print("✅ 推送完成")
 
 
+def cmd_history():
+    """拉取所有自选股历史K线数据"""
+    from collector.spiders.history_quotes import HistoryQuotesCollector
+    from storage.database import Database
+
+    print("🔄 开始拉取所有自选股历史K线数据...")
+    db = Database("data/stock_news.db")
+    collector = HistoryQuotesCollector(db)
+    stocks = db.load_stocks()
+
+    if not stocks:
+        print("❌ 股票池为空，请先运行 python main.py init")
+        return
+
+    print(f"📊 共 {len(stocks)} 只自选股")
+    for s in stocks:
+        print(f"  {s['name']} ({s['code']})")
+
+    result = collector.collect_all_stocks(stocks, limit=500)
+
+    print(f"\n✅ 历史K线采集完成:")
+    print(f"  成功: {result['success']} 只")
+    print(f"  失败: {result['failed']} 只")
+    print(f"  共采集: {result['kline_count']} 条K线")
+
+
 def cmd_schedule():
     """定时采集模式"""
     import schedule as sch
@@ -312,6 +339,7 @@ if __name__ == "__main__":
         "report": cmd_report,
         "api": cmd_api,
         "notify": cmd_notify,
+        "history": cmd_history,
     }
 
     if command in commands:

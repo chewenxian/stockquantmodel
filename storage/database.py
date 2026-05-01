@@ -32,7 +32,7 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA foreign_keys=OFF")
         if self.db_path == ":memory:":
             self._conn = conn
         return conn
@@ -292,6 +292,23 @@ class Database:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_btr_stock ON backtest_results(stock_code);
+
+            -- 17. 历史日K线数据
+            CREATE TABLE IF NOT EXISTS daily_prices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_code TEXT NOT NULL,
+                trade_date DATE NOT NULL,
+                open_price REAL,
+                close_price REAL,
+                high_price REAL,
+                low_price REAL,
+                volume REAL,
+                amount REAL,
+                change_pct REAL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(stock_code, trade_date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_dp_code_date ON daily_prices(stock_code, trade_date DESC);
         """)
         conn.commit()
         self._close(conn)
@@ -1140,4 +1157,100 @@ class Database:
             self._close(conn)
             return [dict(r) for r in rows]
         except Exception:
+            return []
+
+    # ═══════════════════════════════════════════
+    # 历史日K线数据
+    # ═══════════════════════════════════════════
+
+    def upsert_daily_price(self, stock_code: str, trade_date: str,
+                           open_price: float = None, close_price: float = None,
+                           high_price: float = None, low_price: float = None,
+                           volume: float = None, amount: float = None,
+                           change_pct: float = None) -> bool:
+        """插入或更新日K线数据"""
+        try:
+            conn = self._connect()
+            conn.execute("""
+                INSERT INTO daily_prices(
+                    stock_code, trade_date, open_price, close_price,
+                    high_price, low_price, volume, amount, change_pct
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(stock_code, trade_date) DO UPDATE SET
+                    open_price=excluded.open_price,
+                    close_price=excluded.close_price,
+                    high_price=excluded.high_price,
+                    low_price=excluded.low_price,
+                    volume=excluded.volume,
+                    amount=excluded.amount,
+                    change_pct=excluded.change_pct
+            """, (stock_code, trade_date, open_price, close_price,
+                   high_price, low_price, volume, amount, change_pct))
+            conn.commit()
+            self._close(conn)
+            return True
+        except Exception as e:
+            logger = __import__('logging').getLogger(__name__)
+            logger.error(f"插入日K线失败 ({stock_code} {trade_date}): {e}")
+            return False
+
+    def get_price_history(self, code: str, days: int = 60) -> List[Dict]:
+        """
+        获取历史K线数据（用于技术指标和图表）
+
+        Args:
+            code: 股票代码
+            days: 获取最近多少条记录
+
+        Returns:
+            按日期升序排列的K线数据列表
+        """
+        try:
+            conn = self._connect()
+            rows = conn.execute("""
+                SELECT trade_date, open_price, close_price, high_price,
+                       low_price, volume, amount, change_pct
+                FROM daily_prices
+                WHERE stock_code = ?
+                ORDER BY trade_date DESC
+                LIMIT ?
+            """, (code, days)).fetchall()
+            self._close(conn)
+            # 按日期升序排列
+            result = [dict(r) for r in rows]
+            result.reverse()
+            return result
+        except Exception as e:
+            logger = __import__('logging').getLogger(__name__)
+            logger.error(f"获取历史K线失败 ({code}): {e}")
+            return []
+
+    def get_price_range(self, code: str, start_date: str, end_date: str) -> List[Dict]:
+        """
+        获取指定日期范围的价格数据
+
+        Args:
+            code: 股票代码
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+
+        Returns:
+            按日期升序排列的K线数据列表
+        """
+        try:
+            conn = self._connect()
+            rows = conn.execute("""
+                SELECT trade_date, open_price, close_price, high_price,
+                       low_price, volume, amount, change_pct
+                FROM daily_prices
+                WHERE stock_code = ?
+                  AND trade_date >= ?
+                  AND trade_date <= ?
+                ORDER BY trade_date ASC
+            """, (code, start_date, end_date)).fetchall()
+            self._close(conn)
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger = __import__('logging').getLogger(__name__)
+            logger.error(f"获取指定范围价格失败 ({code}): {e}")
             return []

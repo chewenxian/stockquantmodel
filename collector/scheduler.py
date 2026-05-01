@@ -21,6 +21,7 @@ from collector.spiders.bse import BSECollector
 from collector.spiders.stcn import STCNCollector
 from collector.spiders.hexin import HexinCollector
 from collector.spiders.gov_policy import GovPolicyCollector
+from collector.spiders.history_quotes import HistoryQuotesCollector
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,9 @@ class CollectScheduler:
 
         if sources.get("gov_policy", True):
             self.collectors["政府政策"] = GovPolicyCollector(self.db, proxy)
+
+        if sources.get("history_quotes", True):
+            self.collectors["历史K线"] = HistoryQuotesCollector(self.db, proxy)
 
         logger.info(f"采集器初始化完成: {list(self.collectors.keys())}")
 
