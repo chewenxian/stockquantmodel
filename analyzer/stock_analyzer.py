@@ -118,38 +118,174 @@ class StockAnalyzer:
     # ──────────────────────────────────────────
 
     def _get_news_for_stock(self, code: str, days: int = 1) -> List[Dict]:
-        """获取某只股票的近期新闻"""
-        if not self.db:
-            return []
-        try:
-            news = self.db.get_stock_news_sentiment(code, days=days)
-            if news:
-                return news
-        except Exception as e:
-            logger.warning(f"读取 {code} 新闻关联失败: {e}")
+        """获取某只股票的近期新闻，数据不足时自动调问财补充"""
+        news = []
+        if self.db:
+            try:
+                news = self.db.get_stock_news_sentiment(code, days=days)
+                if news:
+                    return news
+            except Exception as e:
+                logger.warning(f"读取 {code} 新闻关联失败: {e}")
 
-        # Fallback: 按股票名称关键词搜索
-        try:
-            conn = self.db._connect()
-            name_row = conn.execute(
-                "SELECT name FROM stocks WHERE code=?", (code,)
-            ).fetchone()
-            if name_row and name_row[0]:
-                keyword = name_row[0][:4]
-                rows = conn.execute(
-                    """SELECT id, title, source, published_at, 0.0 as sentiment
-                       FROM news WHERE title LIKE ?
-                       ORDER BY published_at DESC LIMIT 20""",
-                    (f"%{keyword}%",)
-                ).fetchall()
-                conn.close()
-                if rows:
-                    logger.info(f"{code}: 关键词[{keyword}]搜索到 {len(rows)} 条新闻")
-                    return [dict(r) for r in rows]
-            conn.close()
-        except Exception:
-            pass
-        return []
+            # Fallback: 按股票名称关键词搜索
+            try:
+                conn = self.db._connect()
+                name_row = conn.execute(
+                    "SELECT name FROM stocks WHERE code=?", (code,)
+                ).fetchone()
+                if name_row and name_row[0]:
+                    keyword = name_row[0][:4]
+                    rows = conn.execute(
+                        """SELECT id, title, source, published_at, 0.0 as sentiment
+                           FROM news WHERE title LIKE ?
+                           ORDER BY published_at DESC LIMIT 20""",
+                        (f"%{keyword}%",)
+                    ).fetchall()
+                    self.db._close(conn)
+                    if rows:
+                        news = [dict(r) for r in rows]
+                        logger.info(f"{code}: 关键词[{keyword}]搜索到 {len(news)} 条新闻")
+                        return news
+                self.db._close(conn)
+            except Exception:
+                pass
+
+        # 如果数据库没有足够的新闻，调问财按需获取
+        if not news:
+            try:
+                conn = self.db._connect()
+                name_row = conn.execute(
+                    "SELECT name FROM stocks WHERE code=?", (code,)
+                ).fetchone()
+                self.db._close(conn)
+                if name_row:
+                    iwencai_data = self._fetch_iwencai_for_stock(code, name_row[0])
+                    # 转换为标准格式
+                    for item in (iwencai_data.get("news") or []):
+                        news.append({
+                            "id": 0,
+                            "title": item.get("title", ""),
+                            "source": "问财",
+                            "published_at": item.get("publish_date", ""),
+                            "summary": item.get("summary", ""),
+                            "content": item.get("content", ""),
+                            "sentiment": 0.0,
+                        })
+                    logger.info(f"[问财] 补充 {code} 的 {len(iwencai_data.get('news',[]))} 条新闻分析")
+            except Exception as e:
+                logger.warning(f"调问财补充新闻失败: {e}")
+
+        return news
+
+    def _get_announcements_for_stock(self, code: str, days: int = 7) -> List[Dict]:
+        """获取某只股票的近期公告，数据不足时自动调问财补充"""
+        announcements = []
+        if self.db:
+            try:
+                conn = self.db._connect()
+                rows = conn.execute("""
+                    SELECT id, stock_code, title, announce_type, summary, publish_date
+                    FROM announcements
+                    WHERE stock_code = ? AND publish_date >= date('now', ? || ' days', 'localtime')
+                    ORDER BY publish_date DESC LIMIT 20
+                """, (code, f'-{days}')).fetchall()
+                self.db._close(conn)
+                announcements = [dict(r) for r in rows]
+            except Exception as e:
+                logger.warning(f"读取 {code} 公告失败: {e}")
+
+        # 如果数据库没有足够的公告，调问财补充
+        if not announcements:
+            try:
+                conn = self.db._connect()
+                name_row = conn.execute(
+                    "SELECT name FROM stocks WHERE code=?", (code,)
+                ).fetchone()
+                self.db._close(conn)
+                if name_row:
+                    iwencai_data = self._fetch_iwencai_for_stock(code, name_row[0])
+                    for item in (iwencai_data.get("announcements") or []):
+                        announcements.append({
+                            "id": 0,
+                            "stock_code": code,
+                            "title": item.get("title", ""),
+                            "announce_type": "",
+                            "summary": item.get("summary", ""),
+                            "publish_date": item.get("publish_date", ""),
+                        })
+                    logger.info(f"[问财] 补充 {code} 的 {len(iwencai_data.get('announcements',[]))} 条公告分析")
+            except Exception as e:
+                logger.warning(f"调问财补充公告失败: {e}")
+
+        return announcements
+
+    def _fetch_iwencai_for_stock(self, code: str, name: str) -> Dict:
+        """
+        分析个股时按需调用问财 API，获取该股票的最新新闻和公告
+        不写入数据库，直接返回给分析流程使用
+
+        Args:
+            code: 股票代码
+            name: 股票名称
+
+        Returns:
+            {"news": [...], "announcements": [...]}
+        """
+        import os
+        import secrets
+        import json
+        import requests
+
+        api_key = os.environ.get("IWENCAI_API_KEY", "")
+        if not api_key:
+            return {"news": [], "announcements": []}
+
+        result = {"news": [], "announcements": []}
+
+        def call_iwencai(skill_id: str, channel: str, query: str) -> list:
+            trace_id = secrets.token_hex(32)
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                "X-Claw-Call-Type": "normal",
+                "X-Claw-Skill-Id": skill_id,
+                "X-Claw-Skill-Version": "1.0.0",
+                "X-Claw-Plugin-Id": "none",
+                "X-Claw-Plugin-Version": "none",
+                "X-Claw-Trace-Id": trace_id,
+            }
+            payload = {
+                "channels": [channel],
+                "app_id": "AIME_SKILL",
+                "query": query,
+            }
+            try:
+                resp = requests.post(
+                    "https://openapi.iwencai.com/v1/comprehensive/search",
+                    json=payload, headers=headers, timeout=15
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    items = data.get("data", [])
+                    return items if isinstance(items, list) else []
+            except Exception as e:
+                logger.warning(f"[问财] {skill_id} 查询失败: {e}")
+            return []
+
+        # 查新闻
+        query = f"{name} {code} 最新消息"
+        result["news"] = call_iwencai("news-search", "news", query)
+
+        # 查公告
+        query = f"{name} {code} 公告"
+        result["announcements"] = call_iwencai("announcement-search", "announcement", query)
+
+        if result["news"] or result["announcements"]:
+            logger.info(f"[问财] {name}({code}): 获取到 {len(result['news'])} 条新闻, "
+                       f"{len(result['announcements'])} 条公告")
+
+        return result
 
     def _get_market_data(self, code: str) -> Optional[Dict]:
         """获取某只股票的最新行情（优先实时API）"""

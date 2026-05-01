@@ -27,7 +27,6 @@ from collector.spiders.margin_trading import MarginTradingCollector
 from collector.spiders.guba_sentiment import GubaSentimentCollector
 from collector.spiders.bond_yield import BondYieldCollector
 from collector.spiders.stock_hot import StockHotCollector
-from collector.spiders.iwencai import IwencaiNewsCollector, IwencaiAnnouncementCollector
 from collector.fallback import FallbackChain
 from output.realtime_pusher import RealtimePusher
 
@@ -112,10 +111,8 @@ class CollectScheduler:
             self.collectors["股票热度"] = StockHotCollector(self.db, proxy)
 
         # 问财 iwencai 数据源（需要 IWENCAI_API_KEY 环境变量）
-        if sources.get("iwencai_news", True):
-            self.collectors["问财新闻"] = IwencaiNewsCollector(self.db, proxy)
-        if sources.get("iwencai_announcement", True):
-            self.collectors["问财公告"] = IwencaiAnnouncementCollector(self.db, proxy)
+        # ⚠️ 不在每日采集中调用，而是在 analyze_stock 中按需调用
+        # 见 analyzer/stock_analyzer.py _fetch_iwencai_data()
 
         logger.info(f"采集器初始化完成: {list(self.collectors.keys())}")
 
