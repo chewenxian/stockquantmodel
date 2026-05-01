@@ -84,3 +84,29 @@ class BaseCollector:
     def collect(self) -> int:
         """子类实现：执行一次采集，返回采集数量"""
         raise NotImplementedError
+
+    # ───────────────────────────────────
+    # 增量采集辅助
+    # ───────────────────────────────────
+
+    @property
+    def _tracker_key(self) -> str:
+        """增量追踪的 key，子类可覆盖"""
+        return self.__class__.__name__
+
+    def should_fetch(self, min_interval_minutes: int = 15) -> bool:
+        """判断是否需要执行采集"""
+        if not hasattr(self, 'db') or not self.db:
+            return True
+        return self.db.should_fetch(self._tracker_key, min_interval_minutes)
+
+    def mark_fetched(self, item_count: int = 0, error: str = ""):
+        """记录采集结果到 tracker"""
+        if hasattr(self, 'db') and self.db:
+            self.db.mark_fetched(self._tracker_key, item_count, error)
+
+    def get_last_fetch(self):
+        """查询上次采集时间"""
+        if hasattr(self, 'db') and self.db:
+            return self.db.get_last_fetch(self._tracker_key)
+        return None

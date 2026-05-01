@@ -18,10 +18,13 @@
     python main.py history       # 拉取所有自选股历史K线
     python main.py verify        # 交叉验证最近N条新闻（默认50条）
     python main.py verify 100    # 验证最近100条新闻
+    python main.py health        # 采集器健康看板
+    python main.py collect --fallback  # 降级采集模式
 """
 import sys
 import os
 import logging
+from datetime import datetime
 
 # 确保项目根目录在路径中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -91,6 +94,35 @@ def cmd_quick():
     scheduler = CollectScheduler()
     results = scheduler.quick_collect()
     print(f"✅ 快速采集完成: {results}")
+
+
+def cmd_collect_fallback():
+    """降级采集模式：主源失败自动切备用源"""
+    from collector.scheduler import CollectScheduler
+
+    print("🔄 降级采集模式启动...")
+    print("   新闻: 东方财富 → 新浪财经 → 雪球")
+    print("   行情: 东方财富 → 新浪财经")
+    print("   公告: 巨潮资讯 → 上交所/深交所/北交所")
+    print()
+
+    scheduler = CollectScheduler()
+    results = scheduler.collect_with_fallback()
+
+    print(f"\n📊 降级采集结果:")
+    for name, res in results.items():
+        if isinstance(res, dict):
+            items = ", ".join(f"{k}={v}" for k, v in res.items())
+            print(f"  ✅ {name}: {items}")
+        else:
+            print(f"  {name}: {res}")
+
+    # 统计总条数
+    total = sum(
+        sum(v.values()) if isinstance(v, dict) else (v or 0)
+        for v in results.values()
+    )
+    print(f"\n📈 总计采集: {total} 条")
 
 
 def cmd_stats():
@@ -252,6 +284,75 @@ def cmd_notify():
             print("⚠️ 晚报生成失败，可能为非交易日")
 
     print("✅ 推送完成")
+
+
+def cmd_health():
+    """采集器健康看板"""
+    from storage.database import Database
+
+    db = Database("data/stock_news.db")
+    health = db.get_fetch_health()
+    stats = db.get_stats()
+
+    print(f"{'=' * 60}")
+    print(f"📊 采集器健康状态 @ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"{'=' * 60}")
+
+    if not health:
+        print("   暂无采集记录（请先执行采集）")
+    else:
+        print(f"\n  {'状态':<8} {'采集器':<16} {'上次成功':<20} {'条数':<8} {'连续失败':<8}")
+        print(f"  {'-'*6:<8} {'-'*14:<16} {'-'*18:<20} {'-'*6:<8} {'-'*8:<8}")
+        for h in health:
+            status_emoji = {
+                "ok": "✅",
+                "warning": "⚠️",
+                "error": "❌",
+            }.get(h["status"], "❓")
+            last_time = h["last_success_at"][:19] if h["last_success_at"] else "-"
+            item_count = h["last_item_count"] or 0
+            fails = h["consecutive_failures"] or 0
+            print(f"  {status_emoji:<8} {h['source_key']:<16} {last_time:<20} {item_count:<8} {fails:<8}")
+
+        # 告警
+        errors = [h for h in health if h["status"] == "error"]
+        warnings = [h for h in health if h["status"] == "warning"]
+        if errors:
+            print(f"\n  ❌ 失败告警 ({len(errors)} 个采集器连续失败≥3次):")
+            for h in errors:
+                err = h["last_error"][:60] if h["last_error"] else "未知错误"
+                print(f"    - {h['source_key']}: {err}")
+        if warnings:
+            print(f"\n  ⚠️ 异常预警 ({len(warnings)} 个采集器):")
+            for h in warnings:
+                err = h["last_error"][:60] if h["last_error"] else "未知"
+                print(f"    - {h['source_key']}: {err}")
+
+    print(f"\n{'=' * 60}")
+    print(f"📈 系统概览")
+    print(f"{'=' * 60}")
+    print(f"  🏢 自选股: {stats.get('total_stocks', 0)} 只")
+    print(f"  📰 新闻:    {stats.get('total_news', 0)} 条（今日{stats.get('today_news', 0)}条）")
+    print(f"  📑 公告:    {stats.get('total_announcements', 0)} 条")
+    print(f"  📄 政策:    {stats.get('total_policies', 0)} 条")
+    print(f"  📊 分析:    {stats.get('total_analysis', 0)} 条")
+    print(f"  💾 数据库:  {stats.get('db_size_mb', 0):.2f} MB")
+
+    # 分类分布
+    cats = stats.get("categories", {})
+    if cats:
+        print(f"\n  📂 新闻分类:")
+        for cat, cnt in sorted(cats.items(), key=lambda x: -x[1])[:8]:
+            print(f"    {cat}: {cnt} 条")
+
+    # 来源分布
+    srcs = stats.get("sources", {})
+    if srcs:
+        print(f"\n  🔗 来源分布:")
+        for src, cnt in sorted(srcs.items(), key=lambda x: -x[1])[:8]:
+            print(f"    {src}: {cnt} 条")
+
+    print()
 
 
 def cmd_verify():
@@ -438,6 +539,12 @@ if __name__ == "__main__":
         sys.exit(1)
 
     command = sys.argv[1]
+
+    # 处理 collect --fallback
+    if command == "collect" and "--fallback" in sys.argv:
+        cmd_collect_fallback()
+        sys.exit(0)
+
     commands = {
         "init": cmd_init,
         "collect": cmd_collect,
@@ -450,6 +557,7 @@ if __name__ == "__main__":
         "notify": cmd_notify,
         "history": cmd_history,
         "verify": cmd_verify,
+        "health": cmd_health,
     }
 
     if command in commands:

@@ -374,6 +374,15 @@ class Database:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_sh_date_rank ON stock_hot(trade_date DESC, hot_rank ASC);
+
+            -- 23. 采集增量追踪
+            CREATE TABLE IF NOT EXISTS fetch_tracker (
+                source_key TEXT PRIMARY KEY,
+                last_success_at DATETIME,
+                last_item_count INTEGER DEFAULT 0,
+                last_error TEXT,
+                consecutive_failures INTEGER DEFAULT 0
+            );
         """)
         conn.commit()
         self._close(conn)
@@ -738,6 +747,108 @@ class Database:
         """, (source, data_type, count, status, error_msg))
         conn.commit()
         self._close(conn)
+
+    # ═══════════════════════════════════════════
+    # 增量采集追踪
+    # ═══════════════════════════════════════════
+
+    def get_last_fetch(self, source_key: str) -> Optional[str]:
+        """
+        获取某个采集器上次成功执行的时间
+
+        Args:
+            source_key: 采集器标识，如 'cninfo', 'eastmoney_news'
+
+        Returns:
+            ISO 时间字符串或 None
+        """
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT last_success_at, consecutive_failures FROM fetch_tracker WHERE source_key = ?",
+            (source_key,)
+        ).fetchone()
+        self._close(conn)
+        return dict(row) if row else None
+
+    def should_fetch(self, source_key: str, min_interval_minutes: int = 15) -> bool:
+        """
+        判断是否需要执行采集（距离上次采集超过最小间隔）
+
+        Args:
+            source_key: 采集器标识
+            min_interval_minutes: 最小间隔（分钟）
+
+        Returns:
+            True = 需要执行采集
+        """
+        info = self.get_last_fetch(source_key)
+        if not info or not info.get("last_success_at"):
+            return True  # 从未采集过
+        try:
+            last_dt = datetime.fromisoformat(info["last_success_at"])
+            elapsed = (datetime.now() - last_dt).total_seconds() / 60
+            return elapsed >= min_interval_minutes
+        except Exception:
+            return True
+
+    def mark_fetched(self, source_key: str, item_count: int = 0, error: str = ""):
+        """
+        记录采集结果
+
+        Args:
+            source_key: 采集器标识
+            item_count: 本次采集到的数量
+            error: 错误信息（为空表示成功）
+        """
+        conn = self._connect()
+        now = datetime.now().isoformat()
+        if error:
+            conn.execute("""
+                INSERT INTO fetch_tracker(source_key, last_success_at, last_item_count, last_error, consecutive_failures)
+                VALUES(?, ?, ?, ?, 1)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    last_error = excluded.last_error,
+                    consecutive_failures = consecutive_failures + 1
+            """, (source_key, now, item_count, error[:200]))
+        else:
+            conn.execute("""
+                INSERT INTO fetch_tracker(source_key, last_success_at, last_item_count, last_error, consecutive_failures)
+                VALUES(?, ?, ?, '', 0)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    last_success_at = excluded.last_success_at,
+                    last_item_count = excluded.last_item_count,
+                    last_error = '',
+                    consecutive_failures = 0
+            """, (source_key, now, item_count))
+        conn.commit()
+        self._close(conn)
+
+    def get_fetch_health(self) -> List[Dict]:
+        """
+        获取所有采集器的健康状态
+
+        Returns:
+            [{source_key, last_success_at, last_item_count, last_error, consecutive_failures, status}]
+        """
+        conn = self._connect()
+        rows = conn.execute("""
+            SELECT source_key, last_success_at, last_item_count,
+                   COALESCE(last_error, '') as last_error,
+                   consecutive_failures
+            FROM fetch_tracker
+            ORDER BY source_key
+        """).fetchall()
+        self._close(conn)
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["status"] = (
+                "error" if d["consecutive_failures"] >= 3
+                else "warning" if d["consecutive_failures"] >= 1
+                else "ok"
+            )
+            result.append(d)
+        return result
 
     # ═══════════════════════════════════════════
     # 数据归档

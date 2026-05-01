@@ -27,6 +27,7 @@ from collector.spiders.margin_trading import MarginTradingCollector
 from collector.spiders.guba_sentiment import GubaSentimentCollector
 from collector.spiders.bond_yield import BondYieldCollector
 from collector.spiders.stock_hot import StockHotCollector
+from collector.fallback import FallbackChain
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class CollectScheduler:
         # 初始化所有采集器
         sources = self.config.get("collector", {}).get("sources", {})
         self.collectors = {}
+        self.fallback = FallbackChain(self)
 
         if sources.get("eastmoney", True):
             self.collectors["东方财富"] = EastMoneyCollector(self.db, proxy)
@@ -131,6 +133,60 @@ class CollectScheduler:
 
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info(f"===== 全量采集完成, 耗时 {elapsed:.1f}s =====")
+        return results
+
+    def collect_with_fallback(self) -> Dict[str, int]:
+        """
+        降级采集：各数据源优先使用主采集器，失败自动降级
+        """
+        results = {}
+        stocks = self.db.load_stocks()
+        start_time = datetime.now()
+        logger.info(f"===== 降级采集: {start_time.strftime('%Y-%m-%d %H:%M')} =====")
+
+        # 公告：优先巨潮，失败降级到交易所
+        logger.info("[降级链] 开始公告采集...")
+        results["announcements"] = self.fallback.get_announcements(stocks)
+
+        # 新闻：优先东方财富，失败降级到新浪/雪球
+        logger.info("[降级链] 开始新闻采集...")
+        results["news"] = self.fallback.get_news()
+
+        # 行情：优先东方财富，失败降级到新浪
+        logger.info("[降级链] 开始行情采集...")
+        results["quotes"] = self.fallback.get_quotes(stocks)
+
+        # 补充采集（独立运行，不参与降级）
+        supplement = [
+            "政策宏观", "金十数据", "政府政策",
+            "北向资金", "融资融券", "股吧情绪",
+            "国债收益率", "股票热度", "历史K线",
+            "证券时报",
+        ]
+        for name in supplement:
+            c = self.collectors.get(name)
+            if not c:
+                continue
+            try:
+                logger.info(f"[{name}] 补充采集...")
+                r = c.collect()
+                results[name] = r if isinstance(r, dict) else {"count": r}
+                if self.db:
+                    self.db.mark_fetched(name, 
+                        item_count=sum(r.values()) if isinstance(r, dict) else r,
+                        error="")
+            except Exception as e:
+                logger.error(f"[{name}] 采集失败: {e}")
+                results[name] = {"error": str(e)[:100]}
+                if self.db:
+                    self.db.mark_fetched(name, error=str(e)[:200])
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+        total = sum(
+            sum(v.values()) if isinstance(v, dict) else v
+            for v in results.values() if v
+        )
+        logger.info(f"===== 降级采集完成, 共 {total} 条, 耗时 {elapsed:.1f}s =====")
         return results
 
     def quick_collect(self) -> Dict[str, int]:
