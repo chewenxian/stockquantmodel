@@ -76,14 +76,38 @@ class StockAnalyzer:
     # ──────────────────────────────────────────
 
     def _get_news_for_stock(self, code: str, days: int = 1) -> List[Dict]:
-        """获取某只股票的近期新闻"""
+        """获取某只股票的近期新闻，支持news_stocks关联和关键词搜索两种方式"""
         if not self.db:
             return []
         try:
-            return self.db.get_stock_news_sentiment(code, days=days)
+            news = self.db.get_stock_news_sentiment(code, days=days)
+            if news:
+                return news
         except Exception as e:
-            logger.error(f"读取 {code} 新闻失败: {e}")
-            return []
+            logger.warning(f"读取 {code} 新闻关联失败: {e}")
+
+        # Fallback: 按股票名称关键词搜索新闻
+        try:
+            conn = self.db._connect()
+            name_row = conn.execute(
+                "SELECT name FROM stocks WHERE code=?", (code,)
+            ).fetchone()
+            if name_row and name_row[0]:
+                keyword = name_row[0][:4]
+                rows = conn.execute(
+                    """SELECT id, title, source, published_at, 0.0 as sentiment
+                       FROM news WHERE title LIKE ?
+                       ORDER BY published_at DESC LIMIT 20""",
+                    (f"%{keyword}%",)
+                ).fetchall()
+                conn.close()
+                if rows:
+                    logger.info(f"{code}: 关键词[{keyword}]搜索到 {len(rows)} 条新闻")
+                    return [dict(r) for r in rows]
+            conn.close()
+        except Exception as e2:
+            logger.warning(f"{code}: 关键词搜索异常: {e2}")
+        return []
 
     def _get_market_data(self, code: str) -> Optional[Dict]:
         """获取某只股票的最新行情"""

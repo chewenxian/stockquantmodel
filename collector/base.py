@@ -55,6 +55,9 @@ class BaseCollector:
                     **kwargs
                 )
                 resp.raise_for_status()
+                # 修复编码：中文网站常被错误识别为ISO-8859-1
+                if resp.encoding and resp.encoding.lower() == 'iso-8859-1':
+                    resp.encoding = resp.apparent_encoding or 'utf-8'
                 return resp
             except requests.exceptions.RequestException as e:
                 logger.warning(f"[{self.__class__.__name__}] GET {url} 失败 (尝试 {attempt+1}/3): {e}")
@@ -65,6 +68,10 @@ class BaseCollector:
     def get_json(self, url: str, params: dict = None, **kwargs) -> Optional[dict]:
         resp = self.get(url, params, **kwargs)
         if resp:
+            # JSON API强制使用UTF-8
+            if 'json' in resp.headers.get('content-type', '') and resp.encoding:
+                if resp.encoding.lower() == 'iso-8859-1':
+                    resp.encoding = 'utf-8'
             try:
                 return resp.json()
             except Exception as e:
