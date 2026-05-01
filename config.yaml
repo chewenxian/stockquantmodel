@@ -35,6 +35,7 @@ collector:
     cls: true             # 财联社（电报快讯）
     wallstreet: true      # 华尔街见闻
     tencent: true         # 腾讯证券
+    jin10: true           # 金十数据（快讯）
     national_stat: true   # 国家统计局（宏观数据）
     sse: true             # 上交所公告
 

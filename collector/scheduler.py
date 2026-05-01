@@ -14,6 +14,7 @@ from collector.spiders.sina_finance import SinaFinanceCollector
 from collector.spiders.xueqiu import XueqiuCollector
 from collector.spiders.cninfo import CninfoCollector
 from collector.spiders.policy_collector import PolicyCollector
+from collector.spiders.jin10 import Jin10Collector
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,9 @@ class CollectScheduler:
 
         if sources.get("cls", True) or sources.get("wallstreet", True):
             self.collectors["政策宏观"] = PolicyCollector(self.db, proxy)
+
+        if sources.get("jin10", True):
+            self.collectors["金十数据"] = Jin10Collector(self.db, proxy)
 
         logger.info(f"采集器初始化完成: {list(self.collectors.keys())}")
 
