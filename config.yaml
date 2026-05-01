@@ -41,6 +41,11 @@ collector:
     10jqka: true          # 同花顺7x24快讯
     gov_policy: true      # 央行/发改委/工信部政策
     history_quotes: true   # 历史K线数据
+    north_flow: true       # 北向资金流向
+    margin_trading: true   # 融资融券数据
+    guba_sentiment: true   # 股吧情绪
+    bond_yield: true       # 国债收益率
+    stock_hot: true        # 股票热度排行
 
 # 分析模块
 analyzer:

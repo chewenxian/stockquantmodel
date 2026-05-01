@@ -22,6 +22,11 @@ from collector.spiders.stcn import STCNCollector
 from collector.spiders.hexin import HexinCollector
 from collector.spiders.gov_policy import GovPolicyCollector
 from collector.spiders.history_quotes import HistoryQuotesCollector
+from collector.spiders.north_flow import NorthFlowCollector
+from collector.spiders.margin_trading import MarginTradingCollector
+from collector.spiders.guba_sentiment import GubaSentimentCollector
+from collector.spiders.bond_yield import BondYieldCollector
+from collector.spiders.stock_hot import StockHotCollector
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +90,21 @@ class CollectScheduler:
 
         if sources.get("history_quotes", True):
             self.collectors["历史K线"] = HistoryQuotesCollector(self.db, proxy)
+
+        if sources.get("north_flow", True):
+            self.collectors["北向资金"] = NorthFlowCollector(self.db, proxy)
+
+        if sources.get("margin_trading", True):
+            self.collectors["融资融券"] = MarginTradingCollector(self.db, proxy)
+
+        if sources.get("guba_sentiment", True):
+            self.collectors["股吧情绪"] = GubaSentimentCollector(self.db, proxy)
+
+        if sources.get("bond_yield", True):
+            self.collectors["国债收益率"] = BondYieldCollector(self.db, proxy)
+
+        if sources.get("stock_hot", True):
+            self.collectors["股票热度"] = StockHotCollector(self.db, proxy)
 
         logger.info(f"采集器初始化完成: {list(self.collectors.keys())}")
 

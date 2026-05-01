@@ -309,6 +309,71 @@ class Database:
                 UNIQUE(stock_code, trade_date)
             );
             CREATE INDEX IF NOT EXISTS idx_dp_code_date ON daily_prices(stock_code, trade_date DESC);
+
+            -- 18. 北向资金流入
+            CREATE TABLE IF NOT EXISTS north_flow (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date DATE,
+                sh_net REAL,
+                sz_net REAL,
+                total_net REAL,
+                cumulative_net REAL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_nf_date ON north_flow(trade_date DESC);
+
+            -- 19. 融资融券
+            CREATE TABLE IF NOT EXISTS margin_trading (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_code TEXT,
+                stock_name TEXT,
+                margin_balance REAL,
+                short_balance REAL,
+                margin_net_buy REAL,
+                trade_date DATE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_mt_stock_date ON margin_trading(stock_code, trade_date DESC);
+
+            -- 20. 股吧情绪
+            CREATE TABLE IF NOT EXISTS guba_sentiment (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_code TEXT,
+                stock_name TEXT,
+                post_count INTEGER DEFAULT 0,
+                view_count INTEGER DEFAULT 0,
+                bullish_ratio REAL DEFAULT 0.0,
+                bearish_ratio REAL DEFAULT 0.0,
+                sentiment_score REAL DEFAULT 0.0,
+                trade_date DATE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_gs_stock_date ON guba_sentiment(stock_code, trade_date DESC);
+
+            -- 21. 国债收益率
+            CREATE TABLE IF NOT EXISTS bond_yield (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                yield_name TEXT,
+                yield_value REAL,
+                unit TEXT DEFAULT '%',
+                trade_date DATE,
+                source TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_by_name_date ON bond_yield(yield_name, trade_date DESC);
+
+            -- 22. 股票热度排行
+            CREATE TABLE IF NOT EXISTS stock_hot (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_code TEXT,
+                stock_name TEXT,
+                hot_rank INTEGER,
+                hot_score REAL,
+                change_pct REAL,
+                trade_date DATE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_sh_date_rank ON stock_hot(trade_date DESC, hot_rank ASC);
         """)
         conn.commit()
         self._close(conn)
