@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 # 交易成本：单边万分之三（佣金+印花税简化）
 TRANSACTION_COST = 0.0003
 
+# 滑点：千分之一
+SLIPPAGE_RATE = 0.001
+
 # 基准代码（沪深300）
 BENCHMARK_CODE = "000300"
 
@@ -128,11 +131,11 @@ class BacktestEngine:
                 "equity_curve": [...]
             }
         """
-        # 默认时间范围
+        # 默认时间范围（默认1年）
         if not end_date:
             end_date = datetime.now().strftime("%Y-%m-%d")
         if not start_date:
-            start = datetime.now() - timedelta(days=90)
+            start = datetime.now() - timedelta(days=365)
             start_date = start.strftime("%Y-%m-%d")
 
         # 获取回测信号
@@ -158,6 +161,8 @@ class BacktestEngine:
         wins = 0
         daily_returns = []
 
+        cost_rate = TRANSACTION_COST + SLIPPAGE_RATE
+
         for signal in signals:
             s_date = signal["signal_date"]
             if s_date not in price_map:
@@ -172,8 +177,8 @@ class BacktestEngine:
 
             # 执行交易
             if position_ratio > 0 and position <= 0:
-                # 开仓
-                cost = position_ratio * TRANSACTION_COST
+                # 开仓（成本 = 交易成本 + 滑点）
+                cost = position_ratio * cost_rate
                 position = position_ratio - cost
                 cash -= cost
                 trade_count += 1
@@ -183,10 +188,11 @@ class BacktestEngine:
                     "price": price,
                     "position": position,
                     "capital": capital,
+                    "cost": round(cost, 6),
                 })
             elif position_ratio <= 0 and position > 0:
-                # 平仓
-                cost = position * TRANSACTION_COST
+                # 平仓（成本 = 交易成本 + 滑点）
+                cost = position * cost_rate
                 position = 0
                 cash -= cost
                 trades.append({
@@ -195,6 +201,7 @@ class BacktestEngine:
                     "price": price,
                     "position": 0,
                     "capital": capital,
+                    "cost": round(cost, 6),
                 })
 
             # 计算当日资产
@@ -267,6 +274,9 @@ class BacktestEngine:
             "alpha": round(alpha, 4),
             "trades": trades,
             "equity_curve": equity_curve,
+            "slippage_rate": SLIPPAGE_RATE,
+            "transaction_cost": TRANSACTION_COST,
+            "cost_rate": cost_rate,
         }
 
         # 保存结果到数据库
@@ -516,6 +526,147 @@ class BacktestEngine:
                 "return": worst.get("total_return", 0),
             },
         }
+
+    # ═══════════════════════════════════════════════
+    # Monte Carlo 模拟
+    # ═══════════════════════════════════════════════
+
+    def monte_carlo_analysis(self, stock_code: str,
+                              start_date: str = None,
+                              end_date: str = None,
+                              simulations: int = 1000) -> Dict[str, Any]:
+        """
+        对回测结果做 Monte Carlo 模拟
+
+        通过随机扰动收益率序列，生成大量模拟路径，评估策略的稳健性。
+
+        Args:
+            stock_code: 股票代码
+            start_date: 开始日期
+            end_date: 结束日期
+            simulations: 模拟次数（默认1000）
+
+        Returns:
+            {
+                "expected_return": 期望收益率,
+                "var_95": 95% VaR（最大可能亏损）,
+                "max_drawdown_95": 95%置信度最大回撤,
+                "probability_profit": 盈利概率,
+                "median_return": 中位数收益率,
+                "std_return": 收益率标准差,
+                "best_return": 最佳情景收益率,
+                "worst_return": 最差情景收益率,
+                "simulations": 模拟次数,
+            }
+        """
+        import random as _random
+
+        default_result = {
+            "expected_return": 0.0,
+            "var_95": 0.0,
+            "max_drawdown_95": 0.0,
+            "probability_profit": 0.0,
+            "median_return": 0.0,
+            "std_return": 0.0,
+            "best_return": 0.0,
+            "worst_return": 0.0,
+            "simulations": simulations,
+            "error": None,
+        }
+
+        try:
+            # 先跑一次回测获取收益率序列
+            result = self.run_backtest(stock_code, start_date, end_date)
+            equity_curve = result.get("equity_curve", [])
+
+            if len(equity_curve) < 5:
+                default_result["error"] = "回测数据不足，无法进行Monte Carlo模拟"
+                return default_result
+
+            # 提取每日收益率
+            daily_returns = []
+            for i in range(1, len(equity_curve)):
+                prev_cap = equity_curve[i - 1].get("capital", 1.0)
+                curr_cap = equity_curve[i].get("capital", 1.0)
+                if prev_cap > 0:
+                    daily_returns.append((curr_cap - prev_cap) / prev_cap)
+
+            if len(daily_returns) < 5:
+                default_result["error"] = "收益率序列数据不足"
+                return default_result
+
+            n = len(daily_returns)
+            mean_ret = sum(daily_returns) / n
+            variance = sum((r - mean_ret) ** 2 for r in daily_returns) / (n - 1)
+            std_ret = math.sqrt(variance) if variance > 0 else 0.0
+
+            # Monte Carlo 模拟
+            final_returns = []
+            max_drawdowns = []
+
+            for _ in range(simulations):
+                # 生成一条随机路径
+                capital_mc = 1.0
+                max_capital_mc = 1.0
+                max_dd_mc = 0.0
+
+                for _ in range(n):
+                    # 从收益率序列中随机采样（Bootstrap）
+                    sampled_ret = _random.choice(daily_returns)
+                    # 添加小幅随机扰动
+                    noise = _random.gauss(0, std_ret * 0.1)
+                    ret = sampled_ret + noise
+
+                    capital_mc *= (1.0 + ret)
+                    if capital_mc > max_capital_mc:
+                        max_capital_mc = capital_mc
+                    dd = (max_capital_mc - capital_mc) / max_capital_mc
+                    if dd > max_dd_mc:
+                        max_dd_mc = dd
+
+                final_returns.append(capital_mc - 1.0)
+                max_drawdowns.append(max_dd_mc)
+
+            # 统计结果
+            final_returns.sort()
+            max_drawdowns.sort()
+
+            var_95_index = int(simulations * 0.05)
+            var_95 = abs(final_returns[var_95_index]) if var_95_index < simulations else 0.0
+            dd_95_index = int(simulations * 0.95)
+            max_drawdown_95 = max_drawdowns[dd_95_index] if dd_95_index < simulations else 0.0
+
+            profit_count = sum(1 for r in final_returns if r > 0)
+            probability_profit = profit_count / simulations
+
+            median_index = simulations // 2
+            median_return = final_returns[median_index]
+
+            expected_return = sum(final_returns) / simulations
+            std_final = math.sqrt(
+                sum((r - expected_return) ** 2 for r in final_returns) / simulations
+            )
+
+            mc_result = {
+                "expected_return": round(expected_return, 4),
+                "var_95": round(var_95, 4),
+                "max_drawdown_95": round(max_drawdown_95, 4),
+                "probability_profit": round(probability_profit, 4),
+                "median_return": round(median_return, 4),
+                "std_return": round(std_final, 4),
+                "best_return": round(final_returns[-1], 4),
+                "worst_return": round(final_returns[0], 4),
+                "simulations": simulations,
+            }
+
+            # 将MC结果追加到回测结果中
+            result["monte_carlo"] = mc_result
+            return mc_result
+
+        except Exception as e:
+            logger.error(f"Monte Carlo模拟异常 ({stock_code}): {e}")
+            default_result["error"] = str(e)
+            return default_result
 
     # ═══════════════════════════════════════════════
     # 基准对比

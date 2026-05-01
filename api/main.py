@@ -12,13 +12,16 @@ import sys
 import os
 import json
 import logging
+import time
 from datetime import datetime, date
-from typing import List, Optional
+from typing import List, Optional, Dict as DictType
+from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,62 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ═══════════════════════════════════════════
+# Pydantic 模型
+# ═══════════════════════════════════════════
+
+class BatchAnalyzeRequest(BaseModel):
+    """批量分析请求模型"""
+    codes: List[str]
+    days: int = 1
+
+
+class SearchResult(BaseModel):
+    """搜索结果模型"""
+    total: int
+    results: List[DictType]
+
+
+# ═══════════════════════════════════════════
+# 简单限流（基于时间戳，每IP每分钟最多30次）
+# ═══════════════════════════════════════════
+
+_RATE_LIMIT_WINDOW = 60  # 窗口秒数
+_RATE_LIMIT_MAX = 30     # 最大请求数
+_rate_limit_store = defaultdict(list)  # ip -> [timestamps]
+
+
+def _check_rate_limit(request: Request) -> bool:
+    """
+    检查IP是否超过限流阈值
+
+    Args:
+        request: FastAPI Request 对象
+
+    Returns:
+        bool: True=允许通过, False=超过限流
+    """
+    try:
+        client_ip = request.client.host if request.client else "unknown"
+        now = time.time()
+        window_start = now - _RATE_LIMIT_WINDOW
+
+        # 清理过期记录
+        timestamps = _rate_limit_store[client_ip]
+        _rate_limit_store[client_ip] = [t for t in timestamps if t > window_start]
+
+        # 检查是否超限
+        if len(_rate_limit_store[client_ip]) >= _RATE_LIMIT_MAX:
+            return False
+
+        _rate_limit_store[client_ip].append(now)
+        return True
+
+    except Exception:
+        # 限流出错时放行，避免影响正常使用
+        return True
 
 
 # ═══════════════════════════════════════════
@@ -98,8 +157,12 @@ async def root():
 
 
 @app.get("/analyze/{code}")
-async def analyze_stock(code: str, days: int = Query(1, ge=1, le=30)):
+async def analyze_stock(code: str, days: int = Query(1, ge=1, le=30), request: Request = None):
     """个股分析"""
+    # 简单限流
+    if request and not _check_rate_limit(request):
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试（每分钟最多30次）")
+
     analyzer = _get_analyzer()
     try:
         result = analyzer.analyze_stock(code, days=days)
@@ -114,8 +177,12 @@ async def analyze_stock(code: str, days: int = Query(1, ge=1, le=30)):
 
 
 @app.get("/analyze")
-async def analyze_all():
+async def analyze_all(request: Request = None):
     """全量分析"""
+    # 简单限流
+    if request and not _check_rate_limit(request):
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试（每分钟最多30次）")
+
     analyzer = _get_analyzer()
     try:
         results = analyzer.analyze_all_stocks()
@@ -249,6 +316,148 @@ async def get_stats():
     except Exception as e:
         logger.error(f"获取统计失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════
+# 搜索与批量分析
+# ═══════════════════════════════════════════
+
+@app.get("/search")
+async def search_news(
+    q: str = Query(..., description="搜索关键词"),
+    limit: int = Query(10, ge=1, le=50),
+    source: Optional[str] = Query(None, description="数据源过滤"),
+    request: Request = None,
+):
+    """
+    搜索新闻和公告
+
+    支持关键词搜索、数据源过滤
+
+    Args:
+        q: 搜索关键词
+        limit: 返回结果数量上限（1~50，默认10）
+        source: 数据源过滤（如：东方财富、巨潮资讯等）
+        request: FastAPI请求对象（用于限流）
+
+    Returns:
+        {
+            "total": 总结果数,
+            "results": [新闻/公告列表],
+            "query": 搜索关键词,
+            "source": 数据源过滤,
+        }
+    """
+    # 简单限流
+    if request and not _check_rate_limit(request):
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试（每分钟最多30次）")
+
+    db = _get_db()
+    try:
+        # 搜索新闻
+        news_results = db.search_news(q, limit=limit * 2)  # 多取一些以便混合
+        # 搜索公告
+        announcements_results = db.search_announcements(q, limit=limit * 2)
+
+        results = []
+
+        # 合并新闻结果
+        for item in (news_results or []):
+            result_item = {
+                "type": "news",
+                "title": item.get("title", ""),
+                "summary": item.get("summary", ""),
+                "source": item.get("source", ""),
+                "published_at": item.get("published_at", ""),
+                "stock_code": item.get("stock_code", ""),
+                "url": item.get("url", ""),
+                "sentiment": item.get("sentiment", 0),
+            }
+            # 按数据源过滤
+            if source and source not in str(result_item.get("source", "")):
+                continue
+            results.append(result_item)
+
+        # 合并公告结果
+        for item in (announcements_results or []):
+            result_item = {
+                "type": "announcement",
+                "title": item.get("title", ""),
+                "summary": item.get("content", "")[:200],
+                "source": item.get("source", "公告"),
+                "published_at": item.get("published_at", ""),
+                "stock_code": item.get("stock_code", ""),
+                "url": item.get("url", ""),
+            }
+            if source and source not in str(result_item.get("source", "")):
+                continue
+            results.append(result_item)
+
+        # 按时间排序（最新的在前）
+        results.sort(key=lambda x: x.get("published_at", ""), reverse=True)
+
+        # 截取限制
+        results = results[:limit]
+
+        return {
+            "total": len(results),
+            "results": results,
+            "query": q,
+            "source": source,
+        }
+
+    except Exception as e:
+        logger.error(f"搜索失败 (q={q}): {e}")
+        raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+
+
+@app.post("/batch_analyze")
+async def batch_analyze(request: BatchAnalyzeRequest):
+    """
+    批量分析多只股票
+
+    接受股票代码列表，返回每只股票的分析结果
+
+    Args:
+        request: 批量分析请求 {"codes": ["000001", "600000"], "days": 1}
+
+    Returns:
+        {
+            "count": 成功分析数量,
+            "results": [分析结果列表],
+            "errors": [失败列表],
+        }
+    """
+    analyzer = _get_analyzer()
+    codes = request.codes
+    days = request.days
+
+    results = []
+    errors = []
+
+    for code in codes:
+        try:
+            result = analyzer.analyze_stock(code, days=days)
+            if result and "error" not in result:
+                results.append(result)
+            else:
+                errors.append({
+                    "code": code,
+                    "error": result.get("error", "分析返回空结果") if result else "分析失败",
+                })
+        except Exception as e:
+            logger.error(f"批量分析 {code} 失败: {e}")
+            errors.append({
+                "code": code,
+                "error": str(e),
+            })
+
+    return {
+        "count": len(results),
+        "results": results,
+        "errors": errors,
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 # ═══════════════════════════════════════════
