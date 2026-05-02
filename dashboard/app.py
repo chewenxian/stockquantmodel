@@ -927,36 +927,36 @@ def page_money_flow():
         try:
             mf_data = query_sql(
                 db,
-                "SELECT mf.*, s.name FROM money_flow mf "
-                "LEFT JOIN stocks s ON mf.stock_code = s.code "
+                "SELECT mf.* FROM money_flow mf "
                 "WHERE mf.date = (SELECT MAX(date) FROM money_flow) "
                 "ORDER BY ABS(mf.main_net) DESC LIMIT 30"
             )
             if mf_data:
                 df = pd.DataFrame(mf_data)
+                # 从 money_flow 的 stock_code 推断板块名称（同花顺指数代码）
+                # 显示原始代码作为标识
+                df["name"] = df["stock_code"]
                 cols = ["stock_code", "name", "date", "main_net", "retail_net",
                         "north_net", "large_order_net", "total_amount"]
                 display_cols = [c for c in cols if c in df.columns]
                 df_display = df[display_cols].copy()
-                # 转为"万"单位
                 for c in ["main_net", "retail_net", "north_net", "large_order_net", "total_amount"]:
                     if c in df_display.columns:
                         df_display[c] = df_display[c].apply(lambda x: safe_format((x or 0)/1e4, '{:+.2f}') + "万")
-                df_display.columns = ["代码", "名称", "日期", "主力净流入", "散户净流入",
+                df_display.columns = ["板块代码", "板块代码", "日期", "主力净流入", "散户净流入",
                                        "北向净流入", "大单净流入", "成交总额"]
                 st.dataframe(df_display, use_container_width=True, hide_index=True)
 
                 # 主力净流入 Top 条形图
                 if "main_net" in df.columns:
                     df_bar = df.nlargest(15, "main_net")
-                    df_bar["label"] = df_bar.apply(
-                        lambda r: f"{r['stock_code']} {r.get('name','')}", axis=1)
+                    df_bar["label"] = df_bar["stock_code"]
                     fig = px.bar(
                         df_bar.sort_values("main_net"),
                         x="main_net", y="label", orientation="h",
                         color="main_net",
                         color_continuous_scale=["#ff1744", "#ffd600", "#00c853"],
-                        title="主力净流入 Top15",
+                        title="板块主力净流入 Top15",
                         labels={"main_net": "主力净流入(元)", "label": ""},
                     )
                     fig.update_layout(

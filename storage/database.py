@@ -1314,32 +1314,63 @@ class Database:
             return []
 
     def get_latest_market_snapshot(self, code: str) -> Optional[Dict]:
-        """获取某只股票的最新行情快照"""
+        """获取某只股票的最新行情快照（自动处理 sh/sz 前缀）"""
         try:
             conn = self._connect()
-            row = conn.execute("""
-                SELECT price, change_pct, volume, amount, high, low,
-                       open, turnover_rate, pe, pb, total_mv
-                FROM market_snapshots
-                WHERE stock_code = ?
-                ORDER BY snapshot_time DESC LIMIT 1
-            """, (code,)).fetchone()
+            # 尝试精确匹配和带 sh/sz 前缀匹配
+            for try_code in (code, f"sh{code}", f"sz{code}", code.removeprefix("sh").removeprefix("sz")):
+                row = conn.execute("""
+                    SELECT price, change_pct, volume, amount, high, low,
+                           open, turnover_rate, pe, pb, total_mv
+                    FROM market_snapshots
+                    WHERE stock_code = ?
+                    ORDER BY snapshot_time DESC LIMIT 1
+                """, (try_code,)).fetchone()
+                if row:
+                    self._close(conn)
+                    return dict(row)
             self._close(conn)
-            return dict(row) if row else None
+            return None
         except Exception as e:
             logger.warning("获取最新行情失败 (%s): %s", code, e)
             return None
 
-    def get_latest_money_flow(self, code: str) -> Optional[Dict]:
-        """获取某只股票的最新资金流向"""
+    def get_latest_board_index(self) -> Optional[List[Dict]]:
+        """获取最新板块排行数据"""
         try:
             conn = self._connect()
+            rows = conn.execute("""
+                SELECT board_name, board_code, change_pct
+                FROM board_index
+                ORDER BY snapshot_time DESC
+                LIMIT 30
+            """,).fetchall()
+            self._close(conn)
+            return [dict(r) for r in rows] if rows else None
+        except Exception as e:
+            logger.warning("获取板块数据失败: %s", e)
+            return None
+
+    def get_latest_money_flow(self, code: str) -> Optional[Dict]:
+        """获取最新资金流向（先查个股，再查板块）"""
+        try:
+            conn = self._connect()
+            # 先按精确 stock_code 匹配
             row = conn.execute("""
                 SELECT main_net, retail_net, north_net, large_order_net, total_amount
                 FROM money_flow
                 WHERE stock_code = ?
                 ORDER BY date DESC LIMIT 1
             """, (code,)).fetchone()
+            if row:
+                self._close(conn)
+                return dict(row)
+            # 没找到个股数据，返回板块最近数据
+            row = conn.execute("""
+                SELECT main_net, retail_net, north_net, large_order_net, total_amount
+                FROM money_flow
+                ORDER BY date DESC LIMIT 1
+            """).fetchone()
             self._close(conn)
             return dict(row) if row else None
         except Exception as e:
