@@ -2,7 +2,6 @@
 采集调度器：统一管理所有数据源的采集任务
 支持全量采集和增量采集
 """
-import time
 import logging
 from datetime import datetime
 from typing import Dict, Optional
@@ -132,6 +131,12 @@ class CollectScheduler:
                 collector_results = collector.collect()
                 results[name] = collector_results
                 logger.info(f"[{name}] 采集完成: {collector_results}")
+                # 记录采集日志
+                if isinstance(collector_results, dict):
+                    for data_type, count in collector_results.items():
+                        self.db.log_collect(name, data_type, count=count if isinstance(count, int) else 0, status="success")
+                else:
+                    self.db.log_collect(name, "all", count=collector_results if isinstance(collector_results, int) else 0, status="success")
             except Exception as e:
                 logger.error(f"[{name}] 采集失败: {e}", exc_info=True)
                 results[name] = {"error": str(e)}
@@ -214,8 +219,8 @@ class CollectScheduler:
 
         elapsed = (datetime.now() - start_time).total_seconds()
         total = sum(
-            sum(v.values()) if isinstance(v, dict) else v
-            for v in results.values() if v
+            sum(v for v in v.values() if isinstance(v, (int, float))) if isinstance(v, dict) else (v or 0)
+            for v in results.values() if v is not None
         )
         logger.info(f"===== 降级采集完成, 共 {total} 条, 耗时 {elapsed:.1f}s =====")
         return results

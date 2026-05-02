@@ -22,6 +22,8 @@ collector:
     policy: 30        # 政策新闻
     announcement: 60  # 公司公告
     sentiment: 60     # 社交媒体情绪
+    sina_news: 30     # 新浪财经新闻（7个板块）
+    industry_boards: 15  # 行业板块排行
 
   # 数据源开关
   sources:

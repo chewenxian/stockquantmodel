@@ -27,6 +27,7 @@ import sys
 import os
 import logging
 from datetime import datetime
+from config import get_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +72,9 @@ def cmd_init():
     """初始化：加载自选股列表到数据库"""
     from storage.database import Database
     import csv
+    from config import get_db_path
 
-    db = Database("data/stock_news.db")
+    db = Database(get_db_path())
     count = 0
 
     if not os.path.exists("stocks.csv"):
@@ -318,7 +320,7 @@ def cmd_health():
     """采集器健康看板"""
     from storage.database import Database
 
-    db = Database("data/stock_news.db")
+    db = Database(get_db_path())
     health = db.get_fetch_health()
     stats = db.get_stats()
 
@@ -414,7 +416,7 @@ def cmd_verify():
     limit = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 50
     save_to_db = "--save" in sys.argv
 
-    db = Database("data/stock_news.db")
+    db = Database(get_db_path())
     validator = CrossValidator(db=db)
 
     print(f"🔍 开始交叉验证最近 {limit} 条新闻...")
@@ -512,7 +514,7 @@ def cmd_history():
     from storage.database import Database
 
     print("🔄 开始拉取所有自选股历史K线数据...")
-    db = Database("data/stock_news.db")
+    db = Database(get_db_path())
     collector = HistoryQuotesCollector(db)
     stocks = db.load_stocks()
 
@@ -533,27 +535,92 @@ def cmd_history():
 
 
 def cmd_schedule():
-    """定时采集模式"""
+    """定时采集模式（带实时推送）"""
     import schedule as sch
     from collector.scheduler import CollectScheduler
 
     scheduler = CollectScheduler()
     intervals = scheduler.config.get("collector", {}).get("intervals", {})
 
-    print("⏰ 启动定时采集模式")
+    print("⏰ 启动定时采集模式（带实时推送）")
     print(f"  新闻: 每 {intervals.get('news', 30)} 分钟")
     print(f"  行情: 每 {intervals.get('market', 15)} 分钟")
     print(f"  公告: 每 {intervals.get('announcement', 60)} 分钟")
+    print(f"  新浪财经: 每 {intervals.get('sina_news', 30)} 分钟")
+    print(f"  行业板块: 每 {intervals.get('industry_boards', 15)} 分钟")
+    print()
+    print("🚨 每次采集后自动检查重大事件并秒推至 QQ + 飞书")
+    print()
 
-    # 启动快速采集
-    sch.every(intervals.get("news", 30)).minutes.do(scheduler.quick_collect)
+    # 使用带有实时推送的采集
+    def schedule_collect_with_push():
+        try:
+            scheduler.collect_with_push(use_fallback=True)
+        except Exception as e:
+            logger.error(f"定时采集推送异常: {e}")
 
-    # 注册收盘后的定时分析（交易日 15:30）
-    sch.every().monday.at("15:30").do(scheduler.collect_all)
-    sch.every().tuesday.at("15:30").do(scheduler.collect_all)
-    sch.every().wednesday.at("15:30").do(scheduler.collect_all)
-    sch.every().thursday.at("15:30").do(scheduler.collect_all)
-    sch.every().friday.at("15:30").do(scheduler.collect_all)
+    def schedule_quick_with_push():
+        try:
+            scheduler.quick_collect()
+            pushed = scheduler.realtime_pusher.process_new_items()
+            if pushed > 0:
+                logger.info(f"[实时推送] 快速采集触发 {pushed} 条事件推送")
+        except Exception as e:
+            logger.error(f"快速采集推送异常: {e}")
+
+    # 快速采集（含推送）
+    sch.every(intervals.get("news", 30)).minutes.do(schedule_quick_with_push)
+
+    # 新浪财经常规新闻采集（7个板块）
+    # 交易日每5分钟，非交易日每60分钟
+    sina_interval_trade = 5
+    sina_interval_holiday = 60
+
+    def schedule_sina_news():
+        sina = scheduler.collectors.get("新浪财经")
+        if not sina:
+            return
+        # 交易日判断：周末跳过
+        now = datetime.now()
+        if now.weekday() >= 5:
+            logger.info("[新浪财经] 非交易日跳过采集")
+            return
+        try:
+            logger.info(f"[新浪财经] 开始采集（交易日密集模式）...")
+            result = sina.collect()
+            news_count = result.get("news", {}).get("total", 0) if isinstance(result.get("news"), dict) else result.get("news", 0)
+            logger.info(f"[新浪财经] 采集完成: {news_count} 条新闻")
+            pushed = scheduler.realtime_pusher.process_new_items()
+            if pushed:
+                logger.info(f"[新浪财经] 触发 {pushed} 条推送")
+        except Exception as e:
+            logger.error(f"新浪财经定时采集异常: {e}")
+    # 交易日每5分钟跑一次
+    sch.every(sina_interval_trade).minutes.do(schedule_sina_news)
+
+    # 节假日模式：周一到周五以外的时间，60分钟一次
+    def schedule_sina_holiday():
+        sina = scheduler.collectors.get("新浪财经")
+        if not sina:
+            return
+        now = datetime.now()
+        if now.weekday() < 5:
+            return  # 交易日由上面的5分钟任务负责
+        try:
+            logger.info(f"[新浪财经] 节假日模式采集...")
+            result = sina.collect()
+            news_count = result.get("news", {}).get("total", 0) if isinstance(result.get("news"), dict) else result.get("news", 0)
+            logger.info(f"[新浪财经] 节假日采集完成: {news_count} 条")
+        except Exception as e:
+            logger.error(f"新浪财经节假日采集异常: {e}")
+    sch.every(sina_interval_holiday).minutes.do(schedule_sina_holiday)
+
+    # 收盘后的全量采集+推送（交易日 15:30）
+    sch.every().monday.at("15:30").do(schedule_collect_with_push)
+    sch.every().tuesday.at("15:30").do(schedule_collect_with_push)
+    sch.every().wednesday.at("15:30").do(schedule_collect_with_push)
+    sch.every().thursday.at("15:30").do(schedule_collect_with_push)
+    sch.every().friday.at("15:30").do(schedule_collect_with_push)
 
     # 开盘前初始化
     sch.every().monday.at("09:00").do(cmd_init)

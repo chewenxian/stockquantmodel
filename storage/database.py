@@ -10,10 +10,13 @@ v2.0 新增:
 - 数据库统计
 """
 import json
+import logging
 import sqlite3
 import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -43,16 +46,16 @@ class Database:
             return  # 共享连接，不关闭
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("关闭数据库连接时出现异常: %s", e)
 
     def close(self):
         """关闭所有连接（仅用于清理）"""
         if self._conn is not None:
             try:
                 self._conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("关闭主连接时出现异常: %s", e)
             self._conn = None
 
     def _init_tables(self):
@@ -475,21 +478,18 @@ class Database:
                 END;
 
                 CREATE TRIGGER IF NOT EXISTS news_ad AFTER DELETE ON news BEGIN
-                    INSERT INTO news_fts(news_fts, rowid, title, content, summary, source)
-                    VALUES ('delete', old.id, old.title, old.content, old.summary, old.source);
+                    INSERT INTO news_fts(news_fts, rowid) VALUES ('delete', old.id);
                 END;
 
                 CREATE TRIGGER IF NOT EXISTS news_au AFTER UPDATE ON news BEGIN
-                    INSERT INTO news_fts(news_fts, rowid, title, content, summary, source)
-                    VALUES ('delete', old.id, old.title, old.content, old.summary, old.source);
+                    INSERT INTO news_fts(news_fts, rowid) VALUES ('delete', old.id);
                     INSERT INTO news_fts(rowid, title, content, summary, source)
                     VALUES (new.id, new.title, new.content, new.summary, new.source);
                 END;
             """)
             conn.commit()
         except sqlite3.OperationalError as e:
-            # FTS5 可能未启用
-            pass
+            logger.debug("FTS5扩展不可用（可能未启用）: %s", e)
         finally:
             self._close(conn)
 
@@ -616,7 +616,8 @@ class Database:
             last_id = cur.lastrowid
             self._close(conn)
             return last_id
-        except Exception:
+        except Exception as e:
+            logger.warning("插入新闻失败: %s", e)
             return None
 
     def update_news_analysis(self, news_id: int, category: str = None,
@@ -646,7 +647,8 @@ class Database:
             conn.commit()
             self._close(conn)
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning("更新新闻分析字段失败: %s", e)
             return False
 
     def link_news_stock(self, news_id: int, stock_code: str,
@@ -691,7 +693,29 @@ class Database:
             conn.commit()
             self._close(conn)
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning("插入公告失败: %s", e)
+            return False
+
+    def insert_dragon_tiger(self, code: str, trade_date: str,
+                             net_amount: float = 0, buy_amount: float = 0,
+                             sell_amount: float = 0, reason: str = "",
+                             top_buyers: str = "", top_sellers: str = ""):
+        """插入龙虎榜数据"""
+        try:
+            conn = self._connect()
+            conn.execute("""
+                INSERT INTO dragon_tiger(
+                    stock_code, trade_date, net_amount, buy_amount,
+                    sell_amount, reason, top_buyers, top_sellers
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """, (code, trade_date, net_amount, buy_amount,
+                  sell_amount, reason, top_buyers, top_sellers))
+            conn.commit()
+            self._close(conn)
+            return True
+        except Exception as e:
+            logger.warning("插入龙虎榜数据失败: %s", e)
             return False
 
     def insert_money_flow(self, code: str, date: str, main_net: float = 0,
@@ -753,19 +777,17 @@ class Database:
     # 增量采集追踪
     # ═══════════════════════════════════════════
 
-    def get_last_fetch(self, source_key: str) -> Optional[str]:
+    def get_last_fetch(self, source_key: str) -> Optional[dict]:
         """
-        获取某个采集器上次成功执行的时间
-
-        Args:
-            source_key: 采集器标识，如 'cninfo', 'eastmoney_news'
+        获取某个采集器上次采集记录
 
         Returns:
-            ISO 时间字符串或 None
+            dict: {last_success_at, last_item_count, consecutive_failures, last_error} 或 None
         """
         conn = self._connect()
         row = conn.execute(
-            "SELECT last_success_at, consecutive_failures FROM fetch_tracker WHERE source_key = ?",
+            "SELECT last_success_at, last_item_count, consecutive_failures, last_error "
+            "FROM fetch_tracker WHERE source_key = ?",
             (source_key,)
         ).fetchone()
         self._close(conn)
@@ -789,7 +811,8 @@ class Database:
             last_dt = datetime.fromisoformat(info["last_success_at"])
             elapsed = (datetime.now() - last_dt).total_seconds() / 60
             return elapsed >= min_interval_minutes
-        except Exception:
+        except Exception as e:
+            logger.warning("解析上次采集时间失败: %s", e)
             return True
 
     def mark_fetched(self, source_key: str, item_count: int = 0, error: str = ""):
@@ -886,18 +909,18 @@ class Database:
             result["news"] = archived_news if archived_news > 0 else 0
 
             if archived_news > 0:
+                # 同步更新 FTS（必须在 DELETE 之前执行）
+                old_ids = conn.execute("""
+                    SELECT id FROM news
+                    WHERE published_at < ? AND published_at IS NOT NULL
+                """, (cutoff,)).fetchall()
+                for row in old_ids:
+                    conn.execute(
+                        "INSERT INTO news_fts(news_fts, rowid) VALUES ('delete', ?)",
+                        (row["id"],)
+                    )
+
                 # 删除已归档的旧新闻
-                conn.execute("""
-                    DELETE FROM news
-                    WHERE published_at < ? AND published_at IS NOT NULL
-                """, (cutoff,))
-                # 同步更新 FTS
-                conn.execute("""
-                    INSERT INTO news_fts(news_fts, rowid, title, content, summary, source)
-                    SELECT 'delete', id, title, content, summary, source
-                    FROM news
-                    WHERE published_at < ? AND published_at IS NOT NULL
-                """, (cutoff,))
 
             # 归档公告
             cur = conn.execute("""
@@ -920,8 +943,8 @@ class Database:
                 """, (cutoff,))
 
             conn.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error("数据归档失败: %s", e)
         finally:
             self._close(conn)
 
@@ -954,7 +977,8 @@ class Database:
         stats: Dict[str, Any] = {}
         conn = self._connect()
         try:
-            # 基础计数
+            # 基础计数（白名单验证，防止 SQL 注入）
+            _ALLOWED_TABLES = {"news", "announcements", "stocks", "policies", "analysis"}
             for name, table in [
                 ("total_news", "news"),
                 ("total_announcements", "announcements"),
@@ -962,7 +986,10 @@ class Database:
                 ("total_policies", "policies"),
                 ("total_analysis", "analysis"),
             ]:
-                row = conn.execute(f"SELECT COUNT(*) as cnt FROM {table}").fetchone()
+                if table not in _ALLOWED_TABLES:
+                    stats[name] = 0
+                    continue
+                row = conn.execute(f"SELECT COUNT(*) as cnt FROM [{table}]").fetchone()
                 stats[name] = row["cnt"] if row else 0
 
             # 处理状态
@@ -1013,8 +1040,8 @@ class Database:
             """).fetchall()
             stats["sources"] = {r["source"]: r["cnt"] for r in rows}
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("获取数据库统计失败: %s", e)
         finally:
             self._close(conn)
 
@@ -1067,6 +1094,7 @@ class Database:
             self._close(conn)
             return True
         except Exception as e:
+            logger.warning("记录回测信号失败 (%s): %s", stock_code, e)
             return False
 
     def get_backtest_signals(self, stock_code: str,
@@ -1087,7 +1115,8 @@ class Database:
             rows = conn.execute(sql, params).fetchall()
             self._close(conn)
             return [dict(r) for r in rows]
-        except Exception:
+        except Exception as e:
+            logger.warning("获取回测信号失败 (%s): %s", stock_code, e)
             return []
 
     def get_all_backtest_signals(self) -> List[Dict]:
@@ -1102,7 +1131,8 @@ class Database:
             """).fetchall()
             self._close(conn)
             return [dict(r) for r in rows]
-        except Exception:
+        except Exception as e:
+            logger.warning("获取所有回测信号失败: %s", e)
             return []
 
     def save_backtest_result(self, stock_code: str, start_date: str,
@@ -1151,7 +1181,8 @@ class Database:
             conn.commit()
             self._close(conn)
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning("保存回测结果失败 (%s): %s", stock_code, e)
             return False
 
     def get_backtest_results(self, stock_code: str = None) -> List[Dict]:
@@ -1169,7 +1200,8 @@ class Database:
                 ).fetchall()
             self._close(conn)
             return [dict(r) for r in rows]
-        except Exception:
+        except Exception as e:
+            logger.warning("获取回测结果失败: %s", e)
             return []
 
     def get_all_backtest_signals_grouped(self) -> Dict[str, List[Dict]]:
@@ -1214,7 +1246,8 @@ class Database:
             rows = conn.execute(sql, params).fetchall()
             self._close(conn)
             return [dict(r) for r in rows]
-        except Exception:
+        except Exception as e:
+            logger.warning("获取历史价格失败 (%s): %s", code, e)
             return []
 
     def get_latest_market_snapshot(self, code: str) -> Optional[Dict]:
@@ -1230,7 +1263,8 @@ class Database:
             """, (code,)).fetchone()
             self._close(conn)
             return dict(row) if row else None
-        except Exception:
+        except Exception as e:
+            logger.warning("获取最新行情失败 (%s): %s", code, e)
             return None
 
     def get_latest_money_flow(self, code: str) -> Optional[Dict]:
@@ -1245,7 +1279,8 @@ class Database:
             """, (code,)).fetchone()
             self._close(conn)
             return dict(row) if row else None
-        except Exception:
+        except Exception as e:
+            logger.warning("获取最新资金流向失败 (%s): %s", code, e)
             return None
 
     def save_analysis(self, code: str, analysis: Dict) -> bool:
@@ -1327,7 +1362,8 @@ class Database:
             """, (today,)).fetchall()
             self._close(conn)
             return [dict(r) for r in rows]
-        except Exception:
+        except Exception as e:
+            logger.warning("获取今日分析结果失败: %s", e)
             return []
 
     def get_recent_analysis(self, code: str, limit: int = 30) -> List[Dict]:
@@ -1341,7 +1377,8 @@ class Database:
             """, (code, limit)).fetchall()
             self._close(conn)
             return [dict(r) for r in rows]
-        except Exception:
+        except Exception as e:
+            logger.warning("获取历史分析记录失败: %s", e)
             return []
 
     # ═══════════════════════════════════════════
@@ -1415,8 +1452,9 @@ class Database:
                            r.get("low_price"), r.get("volume"),
                            r.get("amount"), r.get("change_pct")))
                     count += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("跳过插入单条日K线数据 (%s): %s",
+                                  r.get("trade_date", "unknown"), e)
             conn.commit()
             self._close(conn)
         except Exception as e:

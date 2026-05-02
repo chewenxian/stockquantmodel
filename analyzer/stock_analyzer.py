@@ -18,6 +18,9 @@ v7.0 新增:
 """
 import logging
 import json
+import os
+import secrets
+import requests
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any
 
@@ -29,16 +32,6 @@ class StockAnalyzer:
     个股分析入口（增强版）
     整合 NER、知识图谱、影响评估、NLP、建议生成的完整流程
     """
-
-    def __init__(self, db=None, nlp_analyzer=None, sentiment_analyzer=None,
-                 trading_advisor=None, knowledge_graph=None, impact_model=None):
-        self.db = db
-        self.nlp = nlp_analyzer
-        self.sentiment = sentiment_analyzer
-        self.advisor = trading_advisor
-        self.kg = knowledge_graph
-        self.impact_model = impact_model
-        self._init_components()
 
     def _init_components(self):
         """延迟初始化各组件"""
@@ -105,10 +98,22 @@ class StockAnalyzer:
             self.cross_validator = None
         return self.cross_validator
 
+    def __init__(self, db=None, nlp_analyzer=None, sentiment_analyzer=None,
+                 trading_advisor=None, knowledge_graph=None, impact_model=None,
+                 config_path: str = "config.yaml"):
+        self.db = db
+        self.nlp = nlp_analyzer
+        self.sentiment = sentiment_analyzer
+        self.advisor = trading_advisor
+        self.kg = knowledge_graph
+        self.impact_model = impact_model
+        self._config_path = config_path
+        self._init_components()
+
     def _load_config(self) -> dict:
         import yaml
         try:
-            with open("config.yaml", "r", encoding="utf-8") as f:
+            with open(self._config_path, "r", encoding="utf-8") as f:
                 return yaml.safe_load(f)
         except Exception:
             return {}
@@ -232,11 +237,6 @@ class StockAnalyzer:
             cached = self._iwencai_cache[cache_key]
             if (datetime.now() - cached["time"]).total_seconds() < 300:  # 5分钟
                 return cached["data"]
-
-        import os
-        import secrets
-        import json
-        import requests
 
         api_key = os.environ.get("IWENCAI_API_KEY", "")
         if not api_key:

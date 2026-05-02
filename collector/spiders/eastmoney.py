@@ -74,7 +74,24 @@ class EastMoneyCollector(BaseCollector):
             logger.error(f"[东方财富] 板块排行采集异常: {e}")
             results["boards"] = 0
 
-        total = sum(results.values())
+        # 按个股采集新闻并关联自选股
+        stock_news_count = 0
+        try:
+            for stock in stocks[:50]:
+                stock_news_count += self.collect_news_for_stock(stock["code"])
+            results["stock_news"] = stock_news_count
+        except Exception as e:
+            logger.error(f"[东方财富] 个股新闻采集异常: {e}")
+            results["stock_news"] = 0
+
+        # 标题匹配：将通用新闻按股票名关联
+        try:
+            linked = self.link_unlinked_news_by_title()
+            results["title_linked"] = linked
+        except Exception as e:
+            logger.error(f"[东方财富] 标题匹配异常: {e}")
+
+        total = sum(v for v in results.values() if isinstance(v, int))
         logger.info(f"[东方财富] 采集完成: {results}, 总计 {total} 条")
         return results
 
@@ -308,10 +325,9 @@ class EastMoneyCollector(BaseCollector):
                                 net_str = cols[4].get_text(strip=True) if len(cols) > 4 else "0"
                                 net_amount = float(net_str.replace(",", "").replace("亿", "e8").replace("万", "e4")) if net_str else 0
 
-                                self.db.insert_money_flow(
-                                    code=code, date=today,
-                                    main_net=net_amount,
-                                    total_amount=0
+                                self.db.insert_dragon_tiger(
+                                    code=code, trade_date=today,
+                                    net_amount=net_amount
                                 )
                                 count += 1
                             except:
@@ -336,8 +352,8 @@ class EastMoneyCollector(BaseCollector):
                                 code = str(item.get("sc", ""))
                                 net_amount = (item.get("netAmt", 0) or 0) / 1e4
                                 if code:
-                                    self.db.insert_money_flow(
-                                        code=code, date=today, main_net=net_amount, total_amount=0
+                                    self.db.insert_dragon_tiger(
+                                        code=code, trade_date=today, net_amount=net_amount
                                     )
                                     count += 1
                             except:
@@ -374,22 +390,24 @@ class EastMoneyCollector(BaseCollector):
             data = self.get_json(self.clist_api, params, headers=headers)
             if data and data.get("data"):
                 items = data["data"].get("diff", [])
-                for item in items:
-                    try:
-                        board_name = item.get("f14", "")
-                        change_pct = item.get("f3", 0) or 0
-                        leader = item.get("f104", "") or ""
+                conn = self.db._connect()
+                try:
+                    for item in items:
+                        try:
+                            board_name = item.get("f14", "")
+                            change_pct = item.get("f3", 0) or 0
+                            leader = item.get("f104", "") or ""
 
-                        conn = self.db._connect()
-                        conn.execute("""
-                            INSERT INTO board_index(board_name, board_code, change_pct, leader_stocks)
-                            VALUES(?, ?, ?, ?)
-                        """, (board_name, str(item.get("f12", "")), change_pct, leader))
-                        conn.commit()
-                        conn.close()
-                        count += 1
-                    except:
-                        pass
+                            conn.execute("""
+                                INSERT INTO board_index(board_name, board_code, change_pct, leader_stocks)
+                                VALUES(?, ?, ?, ?)
+                            """, (board_name, str(item.get("f12", "")), change_pct, leader))
+                            count += 1
+                        except:
+                            pass
+                    conn.commit()
+                finally:
+                    self.db._close(conn)
         return count
 
     def collect_news_for_stock(self, code: str) -> int:
@@ -397,7 +415,6 @@ class EastMoneyCollector(BaseCollector):
         count = 0
         try:
             prefix = "1." if code.startswith("6") else "0."
-            # 从东方财富个股行情页面解析新闻
             url = f"https://quote.eastmoney.com/{prefix.replace('.','')}{code}.html"
             resp = self.get(url, headers={"Referer": "https://www.eastmoney.com/"})
             if resp:
@@ -420,3 +437,39 @@ class EastMoneyCollector(BaseCollector):
             logger.warning(f"[东方财富] 个股新闻采集异常({code}): {e}")
 
         return count
+
+    def link_unlinked_news_by_title(self):
+        """
+        通过标题中的股票名称/代码匹配，将未关联的通用新闻关联到自选股
+        """
+        conn = None
+        try:
+            conn = self.db._connect()
+            stocks = conn.execute("SELECT code, name FROM stocks").fetchall()
+            # 按名称长度排序（长名优先匹配，避免"茅台"匹配到"贵州茅台"之前撞到别的）
+            stocks_sorted = sorted(stocks, key=lambda s: -len(s["name"]))
+
+            linked = 0
+            unlinked = conn.execute("""
+                SELECT n.id, n.title FROM news n
+                LEFT JOIN news_stocks ns ON n.id = ns.news_id
+                WHERE ns.news_id IS NULL
+                ORDER BY n.id DESC LIMIT 500
+            """).fetchall()
+
+            for news in unlinked:
+                title = news["title"] or ""
+                for s in stocks_sorted:
+                    if s["name"] in title:
+                        self.db.link_news_stock(news["id"], s["code"])
+                        linked += 1
+                        break
+
+            logger.info(f"[东方财富] 标题匹配关联 {linked} 条新闻")
+            return linked
+        except Exception as e:
+            logger.warning(f"[东方财富] 标题匹配异常: {e}")
+            return 0
+        finally:
+            if conn is not None:
+                self.db._close(conn) 

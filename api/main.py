@@ -33,9 +33,10 @@ async def lifespan(app: FastAPI):
     from storage.database import Database
     from analyzer.stock_analyzer import StockAnalyzer
     from analyzer.report_generator import ReportGenerator
+    from config import get_db_path
 
     global _db, _analyzer, _report_gen
-    _db = Database("data/stock_news.db")
+    _db = Database(get_db_path())
     _analyzer = StockAnalyzer()
     _report_gen = ReportGenerator()
     logger.info("全局依赖初始化完成 (Database / StockAnalyzer / ReportGenerator)")

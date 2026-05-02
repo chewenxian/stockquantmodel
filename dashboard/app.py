@@ -91,7 +91,11 @@ st.markdown("""
 def get_db():
     """获取数据库实例（缓存避免重复连接）"""
     # 尝试从项目配置获取数据库路径
-    db_path = os.path.join(_project_root, "data", "stock_news.db")
+    try:
+        from config import get_db_path
+        db_path = os.path.join(_project_root, get_db_path())
+    except Exception:
+        db_path = os.path.join(_project_root, "data", "stock_news.db")
     return Database(db_path)
 
 

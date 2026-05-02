@@ -42,7 +42,7 @@ class CninfoCollector(BaseCollector):
             info = self.get_last_fetch()
             logger.info(f"[巨潮] 跳过采集（上次 {info['last_success_at'][:19] if info else '未知'}，未到间隔）")
             if info:
-                results["announcements"] = info["last_item_count"] or 0
+                results["announcements"] = info.get("last_item_count", 0) or 0
             return results
 
         stocks = self.db.load_stocks()
@@ -58,21 +58,24 @@ class CninfoCollector(BaseCollector):
         return results
 
     def _collect_announcements(self, stocks: List[Dict]) -> int:
-        """采集公司公告 - 增量模式，只查上次采集到现在的数据"""
+        """采集公司公告 - 按自选股过滤，只保留关联的公告"""
         count = 0
         today = datetime.now().strftime("%Y-%m-%d")
 
-        # 增量查询：只查上次采集时间之后的数据
+        # 构建自选股code集合用于过滤
+        stock_codes = {s["code"] for s in stocks}
+        # 构建code->name映射
+        stock_names = {s["code"]: s["name"] for s in stocks}
+
+        # 增量查询
         last_info = self.get_last_fetch()
         if last_info and last_info.get("last_success_at"):
             try:
                 last_dt = datetime.fromisoformat(last_info["last_success_at"])
-                # 往前多查2小时，防止漏掉时间窗口边缘的公告
                 start_date = (last_dt - timedelta(hours=2)).strftime("%Y-%m-%d")
             except Exception:
                 start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
         else:
-            # 首次采集：查最近7天
             start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
         headers = {
@@ -84,8 +87,11 @@ class CninfoCollector(BaseCollector):
             "Origin": "http://www.cninfo.com.cn",
         }
 
-        # 先访问首页获取必要cookie
         self.get("http://www.cninfo.com.cn/new/disclosure/stock", headers=headers)
+
+        # API 每次返回相同结果（不按股票过滤），只需按板块查2次：sh + sz
+        seen_ann_ids = set()
+        plates_queried = set()
 
         for stock in stocks:
             try:
@@ -93,10 +99,14 @@ class CninfoCollector(BaseCollector):
                 name = stock["name"]
                 plate = self._get_plate(code)
 
-                # 使用 JSON POST - 关键！form-data POST 会返回0条
+                # 每个板块只查一次
+                if plate in plates_queried:
+                    continue
+                plates_queried.add(plate)
+
                 payload = {
                     "pageNum": 1,
-                    "pageSize": 20,
+                    "pageSize": 50,
                     "column": "szse",
                     "tabName": "fulltext",
                     "plate": plate,
@@ -111,7 +121,7 @@ class CninfoCollector(BaseCollector):
                     "isHLtitle": True,
                 }
 
-                resp = self.session.post(
+                resp = self.post(
                     self.search_url, json=payload, headers=headers, timeout=15
                 )
                 if resp.status_code != 200:
@@ -119,17 +129,34 @@ class CninfoCollector(BaseCollector):
 
                 result = resp.json()
                 items = result.get("announcements", [])
+
                 for ann in items:
                     try:
-                        title = ann.get("announcementTitle", "").strip()
-                        # 去除HTML标签
-                        title = title.replace("<b>", "").replace("</b>", "")
                         ann_id = ann.get("announcementId", "")
-                        ann_type = ann.get("announcementTypeName", "")
-                        pub_date = ann.get("announcementDate", "")
-                        sec_code = ann.get("secCode", code)
+                        if ann_id in seen_ann_ids:
+                            continue
+                        seen_ann_ids.add(ann_id)
 
-                        # 重大公告分类关键词
+                        sec_code = str(ann.get("secCode", "")).strip()
+
+                        # 只保留自选股的公告
+                        if sec_code not in stock_codes:
+                            continue
+
+                        title = ann.get("announcementTitle", "").strip()
+                        title = title.replace("<b>", "").replace("</b>", "")
+
+                        # announcementTime 是毫秒时间戳
+                        ts = ann.get("announcementTime", 0)
+                        if ts:
+                            pub_date = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+                            pub_datetime = datetime.fromtimestamp(ts / 1000).isoformat()
+                        else:
+                            pub_date = ""
+                            pub_datetime = ""
+
+                        ann_type = ann.get("announcementTypeName", "")
+
                         important_keywords = [
                             "业绩预告", "业绩修正", "分红", "送转", "停牌", "复牌",
                             "重大资产重组", "收购", "减持", "增持", "回购",
@@ -150,21 +177,25 @@ class CninfoCollector(BaseCollector):
                             publish_date=pub_date
                         )
 
-                        # 重要公告也存入新闻表
+                        # 重要公告也存入新闻表并关联自选股
                         if is_important:
-                            self.db.insert_news(
+                            news_id = self.db.insert_news(
                                 title=f"【公告】{title}",
                                 url=full_url,
                                 source="巨潮-公司公告",
                                 summary=summary[:300],
-                                published_at=pub_date
+                                published_at=pub_datetime
                             )
+                            if news_id:
+                                self.db.link_news_stock(news_id, sec_code)
                         count += 1
-                    except:
+                    except Exception:
                         pass
+
             except Exception as e:
                 logger.warning(f"[巨潮] 公告采集异常({stock['code']}): {e}")
 
+        logger.info(f"[巨潮] 本次采集: 总返回{len(seen_ann_ids)}条, 自选股相关{count}条")
         return count
 
     def _get_plate(self, code: str) -> str:
