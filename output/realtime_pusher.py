@@ -30,6 +30,9 @@ class RealtimePusher:
     """
     实时事件推送器
     
+    只推送自选股（is_watched=1）的重要事件，
+    按需分析的个股不会触发推送。
+    
     集成到采集流程中：采集完成后调用 check_new_events() 检查是否有需要立即推送的事件。
     也可独立运行：python main.py watch → 每30秒轮询一次数据库。
     """
@@ -69,6 +72,9 @@ class RealtimePusher:
         self._push_cache = {}
         self._DEDUP_WINDOW = 300
 
+        # 只推送自选股事件
+        self._load_watched_stocks()
+
     def _init_db(self):
         """延迟加载数据库"""
         if self.db is None:
@@ -77,6 +83,22 @@ class RealtimePusher:
                 self.db = Database("data/stock_news.db")
             except Exception as e:
                 logger.warning(f"初始化数据库失败: {e}")
+
+    def _load_watched_stocks(self):
+        """加载自选股列表（只推送自选股的事件）"""
+        self._watched_codes = set()
+        if not self.db:
+            return
+        try:
+            conn = self.db._connect()
+            rows = conn.execute(
+                "SELECT code FROM stocks WHERE is_watched = 1"
+            ).fetchall()
+            self._watched_codes = set(r["code"] for r in rows)
+            self.db._close(conn)
+            logger.info(f"[推送] 自选股列表加载完成: {len(self._watched_codes)} 只")
+        except Exception as e:
+            logger.warning(f"[推送] 加载自选股列表失败: {e}")
 
     def _load_last_ids(self):
         """加载上次处理到的最大ID"""
@@ -258,6 +280,12 @@ class RealtimePusher:
                     news_map[nid]["stock_codes"].add(r["stock_code"])
 
             for nid, item in news_map.items():
+                codes = list(item["stock_codes"])
+
+                # 只推送自选股（非自选股即使有重大事件也不推）
+                if not codes or not any(c in self._watched_codes for c in codes):
+                    continue
+
                 detected = self._detect_events_from_text(
                     item["title"],
                     item.get("summary", ""),
@@ -265,7 +293,6 @@ class RealtimePusher:
                 )
                 if detected:
                     for evt in detected:
-                        codes = list(item["stock_codes"])
                         evt["stock_code"] = codes[0] if codes else ""
                         evt["stock_name"] = self._get_stock_name(codes[0]) if codes else ""
                         evt["title"] = item["title"]
@@ -373,6 +400,9 @@ class RealtimePusher:
         Returns:
             推送的事件数量
         """
+        # 每次轮询刷新自选股列表（防止分析中新加的干扰）
+        self._load_watched_stocks()
+
         all_events = []
 
         # 检查新公告

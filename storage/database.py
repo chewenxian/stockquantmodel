@@ -471,6 +471,10 @@ class Database:
              "SELECT verified FROM news LIMIT 1"),
             ("ALTER TABLE news ADD COLUMN evidence TEXT",
              "SELECT evidence FROM news LIMIT 1"),
+
+            # stocks 表 - 是否自选股标记
+            ("ALTER TABLE stocks ADD COLUMN is_watched INTEGER DEFAULT 1",
+             "SELECT is_watched FROM stocks LIMIT 1"),
         ]
 
         for alter_sql, check_sql in migrations:
@@ -1717,10 +1721,10 @@ class Database:
         if not items:
             return 0
         conn = self._connect()
-        sql = """INSERT INTO stocks(code, name, market, reason, industry)
-                 VALUES(?, ?, ?, ?, ?)
+        sql = """INSERT INTO stocks(code, name, market, reason, industry, is_watched)
+                 VALUES(?, ?, ?, ?, ?, 1)
                  ON CONFLICT(code) DO UPDATE SET
-                     name=excluded.name, reason=excluded.reason"""
+                     name=excluded.name, reason=excluded.reason, is_watched=1"""
         for item in items:
             conn.execute(sql, (
                 item.get("code", ""),

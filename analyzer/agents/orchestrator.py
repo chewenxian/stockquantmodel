@@ -313,16 +313,16 @@ class MultiAgentOrchestrator:
         try:
             conn = self.db._connect()
             existing = conn.execute(
-                "SELECT code FROM stocks WHERE code = ?", (code,)
+                "SELECT code, is_watched FROM stocks WHERE code = ?", (code,)
             ).fetchone()
             if not existing:
                 market = "SH" if code.startswith("6") else "BJ" if code.startswith("4") or code.startswith("8") else "SZ"
                 conn.execute(
-                    "INSERT OR IGNORE INTO stocks(code, name, market) VALUES(?, ?, ?)",
+                    "INSERT OR IGNORE INTO stocks(code, name, market, is_watched) VALUES(?, ?, ?, 0)",
                     (code, name, market)
                 )
                 conn.commit()
-                logger.info(f"[按需采集] 自动添加 {name}({code}) 到stocks表")
+                logger.info(f"[按需采集] 自动添加 {name}({code}) 到stocks表 (is_watched=0)")
             self.db._close(conn)
             return True
         except Exception as e:
