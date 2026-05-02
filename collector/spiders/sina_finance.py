@@ -118,8 +118,7 @@ class SinaFinanceCollector(BaseCollector):
         return {"total": total_count, **section_counts}
 
     def _collect_section_news(self, page_url: str, section_name: str) -> int:
-        """采集单个板块的新闻列表"""
-        count = 0
+        """采集单个板块的新闻列表（批量插入）"""
         headers = {
             "Referer": "https://finance.sina.com.cn/",
             "User-Agent": self._random_ua(),
@@ -129,17 +128,16 @@ class SinaFinanceCollector(BaseCollector):
         if not resp:
             return 0
 
-        # 设置编码（新浪页面使用 utf-8）
         resp.encoding = 'utf-8'
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = BeautifulSoup(resp.text, "lxml")
 
         # 提取所有文章链接
         seen_urls = set()
+        news_batch = []
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
             title = a_tag.get_text(strip=True)
 
-            # 过滤：必须有标题、非导航、是文章页
             if not title or len(title) < 8:
                 continue
             if not re.search(r'(finance|cj)\.sina.*shtml|doc', href):
@@ -158,23 +156,19 @@ class SinaFinanceCollector(BaseCollector):
             else:
                 full_url = href
 
-            # 提取日期（从URL或标题附近找）
             pub_date = self._extract_date_from_url(full_url)
 
-            try:
-                news_id = self.db.insert_news(
-                    title=title,
-                    url=full_url,
-                    source=f"新浪-{section_name}",
-                    summary="",
-                    published_at=pub_date or datetime.now().isoformat(),
-                )
-                if news_id:
-                    count += 1
-            except Exception as e:
-                logger.warning(f"新浪新闻入库异常: {title[:20]} {e}")
+            news_batch.append({
+                "title": title,
+                "url": full_url,
+                "source": f"新浪-{section_name}",
+                "summary": "",
+                "published_at": pub_date or datetime.now().isoformat(),
+            })
 
-        return count
+        if not news_batch:
+            return 0
+        return self.db.batch_insert_news(news_batch)
 
     def _extract_date_from_url(self, url: str) -> str:
         """从新浪文章URL中提取日期"""
@@ -193,16 +187,16 @@ class SinaFinanceCollector(BaseCollector):
     # ──────────────────────────────────────────
 
     def _collect_quotes(self, stocks: List[Dict]) -> int:
-        """新浪行情接口 - 支持沪深"""
-        count = 0
+        """新浪行情接口 - 支持沪深（批量插入）"""
         codes = []
         for s in stocks:
             prefix = "sh" if s["market"] == "SH" else "sz"
             codes.append(f"{prefix}{s['code']}")
 
         if not codes:
-            return count
+            return 0
 
+        batch_snapshots = []
         for i in range(0, len(codes), 20):
             batch = ",".join(codes[i:i+20])
             url = f"https://hq.sinajs.cn/list={batch}"
@@ -225,30 +219,32 @@ class SinaFinanceCollector(BaseCollector):
                 if len(parts) < 30:
                     continue
 
-                # 新浪格式：名称,开盘,昨收,当前,最高,最低,...
                 try:
                     close_price = float(parts[2]) if parts[2] else 0
                     price = float(parts[3]) if parts[3] else 0
                     high = float(parts[4]) if parts[4] else 0
                     low = float(parts[5]) if parts[5] else 0
                     open_price = float(parts[1]) if parts[1] else 0
-                    volume = float(parts[8]) if parts[8] else 0  # 成交量
-                    amount = float(parts[9]) if parts[9] else 0  # 成交额
-                    change_pct = 0
-                    if close_price > 0:
-                        change_pct = (price - close_price) / close_price * 100
+                    volume = float(parts[8]) if parts[8] else 0
+                    amount = float(parts[9]) if parts[9] else 0
+                    change_pct = round((price - close_price) / close_price * 100, 2) if close_price > 0 else 0
 
-                    self.db.insert_market_snapshot(
-                        code=code, price=price,
-                        change_pct=round(change_pct, 2),
-                        volume=volume, amount=amount,
-                        high=high, low=low, open=open_price
-                    )
-                    count += 1
+                    batch_snapshots.append({
+                        "stock_code": code,
+                        "price": price,
+                        "change_pct": change_pct,
+                        "volume": volume,
+                        "amount": amount,
+                        "high": high,
+                        "low": low,
+                        "open": open_price,
+                    })
                 except (ValueError, IndexError):
                     continue
 
-        return count
+        if not batch_snapshots:
+            return 0
+        return self.db.batch_insert_market_snapshots(batch_snapshots)
 
     # ──────────────────────────────────────────
     # 美股行情（保留原有逻辑）
@@ -303,14 +299,13 @@ class SinaFinanceCollector(BaseCollector):
 
     def _link_news_to_stocks(self) -> int:
         """
-        将未关联的新浪新闻按标题中的股票名称匹配到自选股
+        将未关联的新浪新闻按标题中的股票名称匹配到自选股（批量关联）
         """
         try:
             conn = self.db._connect()
             stocks = conn.execute("SELECT code, name FROM stocks").fetchall()
             stocks_sorted = sorted(stocks, key=lambda s: -len(s["name"]))
 
-            linked = 0
             unlinked = conn.execute("""
                 SELECT n.id, n.title FROM news n
                 LEFT JOIN news_stocks ns ON n.id = ns.news_id
@@ -319,15 +314,19 @@ class SinaFinanceCollector(BaseCollector):
                 ORDER BY n.id DESC LIMIT 300
             """).fetchall()
 
+            links = []
             for news in unlinked:
                 title = news["title"] or ""
                 for s in stocks_sorted:
                     if s["name"] in title:
-                        self.db.link_news_stock(news["id"], s["code"])
-                        linked += 1
+                        links.append((news["id"], s["code"], 0.0))
                         break
 
             self.db._close(conn)
+
+            linked = 0
+            if links:
+                linked = self.db.batch_link_news_stocks(links)
             return linked
         except Exception as e:
             logger.warning(f"[新浪财经] 标题匹配异常: {e}")

@@ -1,10 +1,17 @@
 """
 采集基类：所有爬虫的公共基础设施
+
+v2.0 优化：
+- 移除 GET/POST 中每次请求前的固定延迟 (time.sleep 0.3~1.0s)
+- 改为按域名的智能速率限制（每个域名每秒最多 N 次请求）
+- 新增批处理辅助方法（批量DB插入）
+- 新增增量采集接口
 """
 import time
 import logging
 import random
-from typing import Optional, Dict, Any, Union
+from collections import defaultdict
+from typing import Optional, Dict, Any, Union, List
 from datetime import datetime
 import requests
 from requests.adapters import HTTPAdapter, Retry
@@ -13,6 +20,19 @@ from utils.logging_ext import CollectorError
 
 
 logger = logging.getLogger(__name__)
+
+# 全局域速率限制器
+_domain_rl: Dict[str, float] = defaultdict(float)
+
+
+def _rate_limit(domain: str, min_interval: float = 0.15):
+    """按域名限流：确保同一域名两次请求之间至少间隔 min_interval 秒"""
+    last = _domain_rl[domain]
+    now = time.time()
+    gap = now - last
+    if gap < min_interval:
+        time.sleep(min_interval - gap)
+    _domain_rl[domain] = time.time()
 
 
 class BaseCollector:
@@ -62,15 +82,29 @@ class BaseCollector:
         ]
         return random.choice(agents)
 
+    def _extract_domain(self, url: str) -> str:
+        """从 URL 中提取域名用于速率限制"""
+        try:
+            from urllib.parse import urlparse
+            return urlparse(url).netloc or url
+        except Exception:
+            return url
+
     def get(self, url: str, params: dict = None, **kwargs) -> Optional[requests.Response]:
-        """带重试和延迟的安全 GET 请求"""
+        """带重试和域名限流的 GET 请求 (v2.0 移除了每次请求前的固定延迟)"""
         timeout = kwargs.pop("timeout", self.DEFAULT_TIMEOUT)
+        raw_headers = kwargs.pop("headers", {})
+
+        # 域名级速率限制（默认 150ms 间隔，约 6 QPS）
+        min_interval = kwargs.pop("rate_limit", 0.15)
+        domain = self._extract_domain(url)
+        _rate_limit(domain, min_interval)
 
         # 国内金融站点绕过代理直连
         bypass_proxy = False
         if self._proxy_config:
-            for domain in self.NO_PROXY_DOMAINS:
-                if domain in url:
+            for d in self.NO_PROXY_DOMAINS:
+                if d in url:
                     bypass_proxy = True
                     break
         if bypass_proxy:
@@ -78,10 +112,9 @@ class BaseCollector:
 
         for attempt in range(3):
             try:
-                time.sleep(random.uniform(0.3, 1.0))
                 resp = self.session.get(
                     url, params=params,
-                    headers={**self.headers, **kwargs.pop("headers", {})},
+                    headers={**self.headers, **raw_headers},
                     timeout=timeout,
                     **kwargs
                 )
@@ -103,10 +136,6 @@ class BaseCollector:
     def get_json(self, url: str, params: dict = None, **kwargs) -> Optional[dict]:
         resp = self.get(url, params, **kwargs)
         if resp:
-            # JSON API强制使用UTF-8
-            if 'json' in resp.headers.get('content-type', '') and resp.encoding:
-                if resp.encoding.lower() == 'iso-8859-1':
-                    resp.encoding = 'utf-8'
             try:
                 return resp.json()
             except Exception as e:
@@ -115,20 +144,24 @@ class BaseCollector:
 
     def post(self, url: str, json: dict = None, data: dict = None,
                **kwargs) -> Optional[requests.Response]:
-        """带代理绕过逻辑的 POST 请求"""
-        # 国内金融站点绕过代理
+        """带域名限流的 POST 请求"""
+        timeout = kwargs.pop("timeout", self.DEFAULT_TIMEOUT)
+        raw_headers = kwargs.pop("headers", {})
+
+        min_interval = kwargs.pop("rate_limit", 0.15)
+        domain = self._extract_domain(url)
+        _rate_limit(domain, min_interval)
+
         if self._proxy_config:
-            for domain in self.NO_PROXY_DOMAINS:
-                if domain in url:
+            for d in self.NO_PROXY_DOMAINS:
+                if d in url:
                     kwargs["proxies"] = {"http": None, "https": None}
                     break
-        timeout = kwargs.pop("timeout", self.DEFAULT_TIMEOUT)
         for attempt in range(3):
             try:
-                time.sleep(random.uniform(0.3, 1.0))
                 resp = self.session.post(
                     url, json=json, data=data,
-                    headers={**self.headers, **kwargs.pop("headers", {})},
+                    headers={**self.headers, **raw_headers},
                     timeout=timeout,
                     **kwargs
                 )

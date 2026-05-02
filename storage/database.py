@@ -1582,3 +1582,266 @@ class Database:
         except Exception as e:
             logger.error(f"获取指定范围价格失败 ({code}): {e}")
             return []
+
+    # ═══════════════════════════════════════════
+    # 批量操作方法（采集优化专用）
+    # ═══════════════════════════════════════════
+
+    def batch_insert_news(self, items: List[Dict]) -> int:
+        """
+        批量插入新闻（单连接单事务极大提升性能）
+
+        Args:
+            items: [{title, url, source, summary, content, published_at, category, keywords, content_hash}]
+
+        Returns:
+            成功插入数量
+        """
+        if not items:
+            return 0
+        count = 0
+        conn = self._connect()
+        try:
+            sql = """INSERT OR IGNORE INTO news(
+                title, url, source, summary, content,
+                published_at, category, keywords, content_hash
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+            for item in items:
+                try:
+                    cur = conn.execute(sql, (
+                        item.get("title", ""),
+                        item.get("url", ""),
+                        item.get("source", ""),
+                        item.get("summary", ""),
+                        item.get("content", ""),
+                        item.get("published_at"),
+                        item.get("category", "其他"),
+                        item.get("keywords", ""),
+                        item.get("content_hash", ""),
+                    ))
+                    if cur.lastrowid:
+                        count += 1
+                except Exception as e:
+                    logger.debug("批量插入单条新闻跳过: %s", e)
+            conn.commit()
+        except Exception as e:
+            logger.error("批量插入新闻事务失败: %s", e)
+        finally:
+            self._close(conn)
+        return count
+
+    def batch_upsert_stocks(self, items: List[Dict]) -> int:
+        """
+        批量更新股票信息
+
+        Args:
+            items: [{code, name, market, reason, industry}]
+
+        Returns:
+            处理数量
+        """
+        if not items:
+            return 0
+        conn = self._connect()
+        sql = """INSERT INTO stocks(code, name, market, reason, industry)
+                 VALUES(?, ?, ?, ?, ?)
+                 ON CONFLICT(code) DO UPDATE SET
+                     name=excluded.name, reason=excluded.reason"""
+        for item in items:
+            conn.execute(sql, (
+                item.get("code", ""),
+                item.get("name", ""),
+                item.get("market", "SH"),
+                item.get("reason", ""),
+                item.get("industry", ""),
+            ))
+        conn.commit()
+        self._close(conn)
+        return len(items)
+
+    def batch_insert_market_snapshots(self, items: List[Dict]) -> int:
+        """
+        批量插入行情快照
+
+        Args:
+            items: [{stock_code, price, change_pct, volume, amount, high, low, open, ...}]
+
+        Returns:
+            成功插入数量
+        """
+        if not items:
+            return 0
+        count = 0
+        conn = self._connect()
+        try:
+            sql = """INSERT INTO market_snapshots(
+                stock_code, price, change_pct, volume, amount,
+                high, low, open, turnover_rate, pe, pb, total_mv
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+            for item in items:
+                try:
+                    conn.execute(sql, (
+                        item.get("stock_code", ""),
+                        item.get("price", 0),
+                        item.get("change_pct", 0),
+                        item.get("volume", 0),
+                        item.get("amount", 0),
+                        item.get("high"),
+                        item.get("low"),
+                        item.get("open"),
+                        item.get("turnover_rate"),
+                        item.get("pe"),
+                        item.get("pb"),
+                        item.get("total_mv"),
+                    ))
+                    count += 1
+                except Exception as e:
+                    logger.debug("批量插入行情单条跳过: %s", e)
+            conn.commit()
+        except Exception as e:
+            logger.error("批量插入行情事务失败: %s", e)
+        finally:
+            self._close(conn)
+        return count
+
+    def batch_insert_money_flow(self, items: List[Dict]) -> int:
+        """
+        批量插入资金流向数据
+
+        Args:
+            items: [{code, date, main_net, retail_net, north_net, large_order_net, total_amount}]
+
+        Returns:
+            成功插入数量
+        """
+        if not items:
+            return 0
+        count = 0
+        conn = self._connect()
+        try:
+            sql = """INSERT INTO money_flow(
+                stock_code, date, main_net, retail_net,
+                north_net, large_order_net, total_amount
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)"""
+            for item in items:
+                try:
+                    conn.execute(sql, (
+                        item.get("code", ""),
+                        item.get("date", ""),
+                        item.get("main_net", 0),
+                        item.get("retail_net", 0),
+                        item.get("north_net", 0),
+                        item.get("large_order_net", 0),
+                        item.get("total_amount", 0),
+                    ))
+                    count += 1
+                except Exception as e:
+                    logger.debug("批量插入资金流向单条跳过: %s", e)
+            conn.commit()
+        except Exception as e:
+            logger.error("批量插入资金流向事务失败: %s", e)
+        finally:
+            self._close(conn)
+        return count
+
+    def batch_insert_dragon_tiger(self, items: List[Dict]) -> int:
+        """
+        批量插入龙虎榜数据
+
+        Args:
+            items: [{code, trade_date, net_amount, buy_amount, sell_amount, reason, top_buyers, top_sellers}]
+
+        Returns:
+            成功插入数量
+        """
+        if not items:
+            return 0
+        count = 0
+        conn = self._connect()
+        try:
+            sql = """INSERT INTO dragon_tiger(
+                stock_code, trade_date, net_amount, buy_amount,
+                sell_amount, reason, top_buyers, top_sellers
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)"""
+            for item in items:
+                try:
+                    conn.execute(sql, (
+                        item.get("code", ""),
+                        item.get("trade_date", ""),
+                        item.get("net_amount", 0),
+                        item.get("buy_amount", 0),
+                        item.get("sell_amount", 0),
+                        item.get("reason", ""),
+                        item.get("top_buyers", ""),
+                        item.get("top_sellers", ""),
+                    ))
+                    count += 1
+                except Exception as e:
+                    logger.debug("批量插入龙虎榜单条跳过: %s", e)
+            conn.commit()
+        except Exception as e:
+            logger.error("批量插入龙虎榜事务失败: %s", e)
+        finally:
+            self._close(conn)
+        return count
+
+    def batch_insert_boards(self, items: List[Dict]) -> int:
+        """
+        批量插入板块排行数据
+
+        Args:
+            items: [{board_name, board_code, change_pct, leader_stocks}]
+
+        Returns:
+            成功插入数量
+        """
+        if not items:
+            return 0
+        count = 0
+        conn = self._connect()
+        try:
+            sql = """INSERT INTO board_index(
+                board_name, board_code, change_pct, leader_stocks
+            ) VALUES(?, ?, ?, ?)"""
+            for item in items:
+                try:
+                    conn.execute(sql, (
+                        item.get("board_name", ""),
+                        item.get("board_code", ""),
+                        item.get("change_pct", 0),
+                        item.get("leader_stocks", ""),
+                    ))
+                    count += 1
+                except Exception as e:
+                    logger.debug("批量插入板块排行单条跳过: %s", e)
+            conn.commit()
+        except Exception as e:
+            logger.error("批量插入板块排行事务失败: %s", e)
+        finally:
+            self._close(conn)
+        return count
+
+    def batch_link_news_stocks(self, links: List[Tuple[int, str, float]]) -> int:
+        """
+        批量关联新闻与股票
+
+        Args:
+            links: [(news_id, stock_code, sentiment), ...]
+
+        Returns:
+            成功关联数量
+        """
+        if not links:
+            return 0
+        conn = self._connect()
+        try:
+            conn.executemany(
+                "INSERT OR IGNORE INTO news_stocks(news_id, stock_code, sentiment) VALUES(?, ?, ?)",
+                links,
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error("批量关联新闻-股票失败: %s", e)
+        finally:
+            self._close(conn)
+        return len(links)

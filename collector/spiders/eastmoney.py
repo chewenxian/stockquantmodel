@@ -97,11 +97,11 @@ class EastMoneyCollector(BaseCollector):
 
     def _collect_news(self) -> int:
         """
-        从东方财富首页解析最新新闻
+        从东方财富首页解析最新新闻 (v2.0 使用批量插入)
+
         首页URL: https://www.eastmoney.com/
         新闻链接格式: https://finance.eastmoney.com/a/YYYYMMDDXXXXXXXXX.html
         """
-        count = 0
         headers = {
             "Referer": "https://www.eastmoney.com/",
             "User-Agent": self._random_ua(),
@@ -111,40 +111,38 @@ class EastMoneyCollector(BaseCollector):
             logger.warning("[东方财富] 首页请求失败，尝试备用新闻源")
             return 0
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = BeautifulSoup(resp.text, "lxml")
         # 查找新闻链接 - 东方财富首页的新闻链接包含 /a/ 路径
         seen_titles = set()
+        news_batch = []
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
-            # 匹配新闻文章链接格式
             if re.search(r'finance\.eastmoney\.com/a/\d+', href) or re.search(r'/a/\d+', href):
                 title = a_tag.get_text(strip=True)
                 if not title or len(title) < 5 or title in seen_titles:
                     continue
                 seen_titles.add(title)
 
-                # 构建完整URL
                 full_url = href if href.startswith("http") else f"https:{href}" if href.startswith("//") else f"https://www.eastmoney.com{href}"
 
-                # 尝试从URL中提取发布日期
                 pub_date = ""
                 date_match = re.search(r'/a/(\d{8})', href)
                 if date_match:
                     d = date_match.group(1)
                     pub_date = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
 
-                try:
-                    news_id = self.db.insert_news(
-                        title=title,
-                        url=full_url,
-                        source="东方财富",
-                        summary="",
-                        published_at=pub_date or datetime.now().isoformat(),
-                    )
-                    if news_id:
-                        count += 1
-                except Exception as e:
-                    logger.warning(f"新闻入库异常: {e}")
+                news_batch.append({
+                    "title": title,
+                    "url": full_url,
+                    "source": "东方财富",
+                    "summary": "",
+                    "published_at": pub_date or datetime.now().isoformat(),
+                })
+
+        count = 0
+        if news_batch:
+            count = self.db.batch_insert_news(news_batch)
+            logger.info(f"[东方财富] 首页批量插入 {count}/{len(news_batch)} 条新闻")
 
         # 如果首页没有解析到足够的新闻，尝试搜索接口
         if count < 10:
@@ -189,9 +187,7 @@ class EastMoneyCollector(BaseCollector):
         return count
 
     def _collect_quotes(self, stocks: List[Dict]) -> int:
-        """采集实时行情 - 使用 ulist.np/get 批量接口（已验证可用）"""
-        count = 0
-        # 东方财富证券ID格式: 1.600519 (1=SH, 0=SZ)
+        """采集实时行情 - 使用 ulist.np/get 批量接口，批量插入"""
         secids = []
         for s in stocks:
             prefix = "1." if s["market"] == "SH" else "0."
@@ -200,7 +196,12 @@ class EastMoneyCollector(BaseCollector):
         if not secids:
             return 0
 
-        # 批量查询（ulist.np/get 支持一次查询最多50只）
+        batch_snapshots = []
+        headers = {
+            "Referer": "https://quote.eastmoney.com/",
+            "User-Agent": self._random_ua(),
+        }
+
         for i in range(0, len(secids), 50):
             batch = ",".join(secids[i:i+50])
             params = {
@@ -209,46 +210,36 @@ class EastMoneyCollector(BaseCollector):
                 "secids": batch,
                 "invt": 2,
             }
-            headers = {
-                "Referer": "https://quote.eastmoney.com/",
-                "User-Agent": self._random_ua(),
-            }
             data = self.get_json(self.batch_quote_api, params, headers=headers)
             if data and data.get("data"):
-                # ulist.np/get 返回格式: {data:{diff:[...]}}
                 items = data["data"].get("diff", [])
                 for item in items:
                     try:
                         code = str(item.get("f57", ""))
-                        # 去除前缀 1./0.
                         code = re.sub(r'^\d+\.', '', code)
                         if not code:
                             continue
-
-                        price = item.get("f2", 0) or 0
-                        change_pct = item.get("f3", 0) or 0
-                        volume = item.get("f4", 0) or 0  # 成交量(手)
-                        amount = item.get("f5", 0) or 0   # 成交额
-                        high = item.get("f15", 0) or 0
-                        low = item.get("f16", 0) or 0
-                        opening = item.get("f17", 0) or 0
-                        turnover = item.get("f20", 0) or 0  # 换手率
-                        pe = item.get("f21", 0) or 0
-
-                        self.db.insert_market_snapshot(
-                            code=code, price=price, change_pct=change_pct,
-                            volume=volume, amount=amount,
-                            high=high, low=low, open=opening,
-                            turnover_rate=turnover, pe=pe
-                        )
-                        count += 1
+                        batch_snapshots.append({
+                            "stock_code": code,
+                            "price": item.get("f2", 0) or 0,
+                            "change_pct": item.get("f3", 0) or 0,
+                            "volume": item.get("f4", 0) or 0,
+                            "amount": item.get("f5", 0) or 0,
+                            "high": item.get("f15", 0) or 0,
+                            "low": item.get("f16", 0) or 0,
+                            "open": item.get("f17", 0) or 0,
+                            "turnover_rate": item.get("f20", 0) or 0,
+                            "pe": item.get("f21", 0) or 0,
+                        })
                     except Exception as e:
                         logger.warning(f"行情解析异常: {e}")
+
+        count = self.db.batch_insert_market_snapshots(batch_snapshots) if batch_snapshots else 0
+        logger.info(f"[东方财富] 批量插入行情 {count}/{len(batch_snapshots)} 条")
         return count
 
     def _collect_money_flow(self, stocks: List[Dict]) -> int:
-        """采集资金流向排行（全市场，按主力净流入排序）"""
-        count = 0
+        """采集资金流向排行（全市场，按主力净流入排序，批量插入）"""
         today = datetime.now().strftime("%Y-%m-%d")
         headers = {
             "Referer": "https://data.eastmoney.com/",
@@ -266,106 +257,113 @@ class EastMoneyCollector(BaseCollector):
             "fields": "f12,f14,f62,f64,f66,f69,f84",
         }
         data = self.get_json(self.clist_api, params, headers=headers)
-        if data and data.get("data"):
-            items = data["data"].get("diff", [])
-            for item in items:
-                try:
-                    code = str(item.get("f12", ""))
-                    if not code:
-                        continue
-                    name = item.get("f14", "")
-                    main_net = (item.get("f62", 0) or 0) / 1e8  # 转亿
-                    retail_net = (item.get("f64", 0) or 0) / 1e8
-                    large_order_net = (item.get("f66", 0) or 0) / 1e8
-                    total_amount = (item.get("f69", 0) or 0) / 1e8
+        if not data or not data.get("data"):
+            return 0
 
-                    self.db.insert_money_flow(
-                        code=code, date=today,
-                        main_net=main_net, retail_net=retail_net,
-                        large_order_net=large_order_net,
-                        total_amount=total_amount
-                    )
-                    count += 1
-                except Exception as e:
-                    logger.warning(f"资金流向解析异常: {e}")
+        items = data["data"].get("diff", [])
+        batch = []
+        for item in items:
+            try:
+                code = str(item.get("f12", ""))
+                if not code:
+                    continue
+                batch.append({
+                    "code": code,
+                    "date": today,
+                    "main_net": (item.get("f62", 0) or 0) / 1e8,
+                    "retail_net": (item.get("f64", 0) or 0) / 1e8,
+                    "large_order_net": (item.get("f66", 0) or 0) / 1e8,
+                    "total_amount": (item.get("f69", 0) or 0) / 1e8,
+                })
+            except Exception as e:
+                logger.warning(f"资金流向解析异常: {e}")
 
+        if not batch:
+            return 0
+        count = self.db.batch_insert_money_flow(batch)
+        logger.info(f"[东方财富] 批量插入资金流向 {count}/{len(batch)} 条")
         return count
 
     def _collect_dragon_tiger(self) -> int:
         """
-        采集龙虎榜数据
+        采集龙虎榜数据（批量插入）
+
         原API: push2ex.eastmoney.com/getStockDragon → 404
         改用 data.eastmoney.com 页面解析
         """
-        count = 0
         today = datetime.now().strftime("%Y-%m-%d")
         headers = {
             "Referer": "https://data.eastmoney.com/",
             "User-Agent": self._random_ua(),
         }
 
+        batch = []
+
+        # 方案一：从数据页面解析龙虎榜
         try:
-            # 尝试从数据页面解析龙虎榜
             url = "https://data.eastmoney.com/stock/tradedetail.html"
             resp = self.get(url, headers=headers)
             if resp:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                # 查找表格数据
+                soup = BeautifulSoup(resp.text, "lxml")
                 table = soup.find("table", id=re.compile(r"dt|dragon|tiger"))
                 if table:
                     rows = table.find_all("tr")
-                    for row in rows[1:]:  # 跳过表头
+                    for row in rows[1:]:
                         cols = row.find_all("td")
                         if len(cols) >= 5:
                             try:
-                                code = cols[1].get_text(strip=True) if len(cols) > 1 else ""
+                                code = cols[1].get_text(strip=True)
                                 if not code:
                                     continue
                                 code = re.sub(r'\D', '', code)
-                                net_str = cols[4].get_text(strip=True) if len(cols) > 4 else "0"
+                                net_str = cols[4].get_text(strip=True)
                                 net_amount = float(net_str.replace(",", "").replace("亿", "e8").replace("万", "e4")) if net_str else 0
 
-                                self.db.insert_dragon_tiger(
-                                    code=code, trade_date=today,
-                                    net_amount=net_amount
-                                )
-                                count += 1
+                                batch.append({
+                                    "code": code,
+                                    "trade_date": today,
+                                    "net_amount": net_amount,
+                                })
                             except:
                                 pass
         except Exception as e:
             logger.warning(f"[东方财富] 龙虎榜页面解析异常: {e}")
 
-        # 如果页面解析失败，尝试备用API
-        if count == 0:
+        # 方案二：如果页面没解析到数据，尝试备用API
+        if not batch:
             try:
-                # 尝试龙虎榜API - 有些变体可能有效
                 data = self.get_json(
                     "https://push2ex.eastmoney.com/getStockDragon",
                     params={"pageSize": 10, "pageNum": 1, "sortType": "Zdf", "sortOrder": "desc"},
                     headers=headers,
                 )
                 if data and data.get("data"):
-                    items = data["data"].get("list", []) if isinstance(data["data"], dict) else data["data"]
+                    raw = data["data"]
+                    items = raw.get("list", []) if isinstance(raw, dict) else raw
                     if isinstance(items, list):
                         for item in items:
                             try:
                                 code = str(item.get("sc", ""))
-                                net_amount = (item.get("netAmt", 0) or 0) / 1e4
-                                if code:
-                                    self.db.insert_dragon_tiger(
-                                        code=code, trade_date=today, net_amount=net_amount
-                                    )
-                                    count += 1
+                                if not code:
+                                    continue
+                                batch.append({
+                                    "code": code,
+                                    "trade_date": today,
+                                    "net_amount": (item.get("netAmt", 0) or 0) / 1e4,
+                                })
                             except:
                                 pass
             except Exception as e:
                 logger.debug(f"[东方财富] 龙虎榜备用API也失败: {e}")
 
+        if not batch:
+            return 0
+        count = self.db.batch_insert_dragon_tiger(batch)
+        logger.info(f"[东方财富] 批量插入龙虎榜 {count}/{len(batch)} 条")
         return count
 
     def _collect_boards(self) -> int:
-        """采集板块涨跌排行（行业板块、概念板块）"""
-        count = 0
+        """采集板块涨跌排行（行业板块、概念板块，批量插入）"""
         headers = {
             "Referer": "https://data.eastmoney.com/bkzj/hy.html",
             "User-Agent": self._random_ua(),
@@ -373,10 +371,11 @@ class EastMoneyCollector(BaseCollector):
 
         # 行业板块 + 概念板块
         board_configs = [
-            ("m:90+t:2", "行业板块"),  # 行业板块
-            ("m:90+t:3", "概念板块"),  # 概念板块
+            ("m:90+t:2", "行业板块"),
+            ("m:90+t:3", "概念板块"),
         ]
 
+        all_batch = []
         for fs, board_type in board_configs:
             params = {
                 "pn": 1, "pz": 30,
@@ -390,66 +389,90 @@ class EastMoneyCollector(BaseCollector):
             data = self.get_json(self.clist_api, params, headers=headers)
             if data and data.get("data"):
                 items = data["data"].get("diff", [])
-                conn = self.db._connect()
-                try:
-                    for item in items:
-                        try:
-                            board_name = item.get("f14", "")
-                            change_pct = item.get("f3", 0) or 0
-                            leader = item.get("f104", "") or ""
+                for item in items:
+                    try:
+                        all_batch.append({
+                            "board_name": item.get("f14", ""),
+                            "board_code": str(item.get("f12", "")),
+                            "change_pct": item.get("f3", 0) or 0,
+                            "leader_stocks": item.get("f104", "") or "",
+                        })
+                    except:
+                        pass
 
-                            conn.execute("""
-                                INSERT INTO board_index(board_name, board_code, change_pct, leader_stocks)
-                                VALUES(?, ?, ?, ?)
-                            """, (board_name, str(item.get("f12", "")), change_pct, leader))
-                            count += 1
-                        except:
-                            pass
-                    conn.commit()
-                finally:
-                    self.db._close(conn)
+        if not all_batch:
+            return 0
+        count = self.db.batch_insert_boards(all_batch)
+        logger.info(f"[东方财富] 批量插入板块排行 {count}/{len(all_batch)} 条")
         return count
 
     def collect_news_for_stock(self, code: str) -> int:
-        """按个股采集相关新闻（从个股页面解析）"""
-        count = 0
+        """按个股采集相关新闻（从个股页面解析，批量插入+关联）"""
+        news_batch = []
         try:
             prefix = "1." if code.startswith("6") else "0."
             url = f"https://quote.eastmoney.com/{prefix.replace('.','')}{code}.html"
             resp = self.get(url, headers={"Referer": "https://www.eastmoney.com/"})
             if resp:
-                soup = BeautifulSoup(resp.text, "html.parser")
+                soup = BeautifulSoup(resp.text, "lxml")
                 for a_tag in soup.find_all("a", href=True):
                     href = a_tag["href"]
                     if re.search(r'/a/\d+', href):
                         title = a_tag.get_text(strip=True)
                         if title and len(title) > 5:
                             full_url = href if href.startswith("http") else f"https:{href}"
-                            news_id = self.db.insert_news(
-                                title=title, url=full_url,
-                                source="东方财富-个股",
-                                published_at=datetime.now().isoformat()
-                            )
-                            if news_id:
-                                self.db.link_news_stock(news_id, code)
-                                count += 1
+                            pub_date = ""
+                            date_match = re.search(r'/a/(\d{8})', href)
+                            if date_match:
+                                d = date_match.group(1)
+                                pub_date = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+                            news_batch.append({
+                                "title": title,
+                                "url": full_url,
+                                "source": "东方财富-个股",
+                                "summary": "",
+                                "published_at": pub_date or datetime.now().isoformat(),
+                            })
         except Exception as e:
             logger.warning(f"[东方财富] 个股新闻采集异常({code}): {e}")
+            return 0
 
-        return count
+        if not news_batch:
+            return 0
+
+        # 1. 批量插入新闻
+        self.db.batch_insert_news(news_batch)
+
+        # 2. 批量关联：通过URL查找已插入的新闻ID并关联到个股
+        urls = [item["url"] for item in news_batch if item.get("url")]
+        if urls:
+            conn = self.db._connect()
+            try:
+                placeholders = ",".join(["?"] * len(urls))
+                rows = conn.execute(
+                    f"SELECT id, url FROM news WHERE url IN ({placeholders})",
+                    urls
+                ).fetchall()
+                links = [(r["id"], code, 0.0) for r in rows]
+                if links:
+                    self.db.batch_link_news_stocks(links)
+            except Exception as e:
+                logger.warning(f"[东方财富] 批量关联个股新闻异常: {e}")
+            finally:
+                self.db._close(conn)
+
+        return len(news_batch)
 
     def link_unlinked_news_by_title(self):
         """
-        通过标题中的股票名称/代码匹配，将未关联的通用新闻关联到自选股
+        通过标题中的股票名称/代码匹配，将未关联的通用新闻关联到自选股（批量关联）
         """
         conn = None
         try:
             conn = self.db._connect()
             stocks = conn.execute("SELECT code, name FROM stocks").fetchall()
-            # 按名称长度排序（长名优先匹配，避免"茅台"匹配到"贵州茅台"之前撞到别的）
             stocks_sorted = sorted(stocks, key=lambda s: -len(s["name"]))
 
-            linked = 0
             unlinked = conn.execute("""
                 SELECT n.id, n.title FROM news n
                 LEFT JOIN news_stocks ns ON n.id = ns.news_id
@@ -457,13 +480,17 @@ class EastMoneyCollector(BaseCollector):
                 ORDER BY n.id DESC LIMIT 500
             """).fetchall()
 
+            links = []
             for news in unlinked:
                 title = news["title"] or ""
                 for s in stocks_sorted:
                     if s["name"] in title:
-                        self.db.link_news_stock(news["id"], s["code"])
-                        linked += 1
+                        links.append((news["id"], s["code"], 0.0))
                         break
+
+            linked = 0
+            if links:
+                linked = self.db.batch_link_news_stocks(links)
 
             logger.info(f"[东方财富] 标题匹配关联 {linked} 条新闻")
             return linked

@@ -3995,3 +3995,45 @@ utils.logging_ext.CollectorError: 采集请求失败: https://push2ex.eastmoney.
 2026-05-02 13:26:01,880 [output.realtime_pusher] INFO: 🚨 实时监控启动: 每 10s 轮询一次
 2026-05-02 13:26:01,880 [output.realtime_pusher] INFO:    推送通道: qq, feishu
 2026-05-02 13:26:01,880 [output.realtime_pusher] INFO:    上次处理: news_id=4899, announcement_id=0
+2026-05-02 15:30:04,571 [analyzer.nlp_analyzer] WARNING: ⚠️ API key 未设置，请在环境变量中配置 DEEPSEEK_API_KEY
+2026-05-02 15:30:04,571 [analyzer.nlp_analyzer] INFO: NLPAnalyzer 初始化: provider=deepseek, model=deepseek-chat, api_base=https://api.deepseek.com
+2026-05-02 15:30:04,573 [analyzer.sentiment] INFO: jieba 不可用，使用双向最大匹配回退分词
+2026-05-02 15:30:04,573 [analyzer.knowledge_graph] INFO: 知识图谱文件不存在: /Users/chewenxian/.openclaw/workspace/stockquantmodel/data/knowledge_graph.json，使用内置数据
+2026-05-02 16:01:39,288 [output.notifier] WARNING: QQ 未配置（缺少 QQ_API_URL 或 QQ_TARGET）
+2026-05-02 16:01:39,984 [output.notifier] INFO: 飞书推送成功
+2026-05-02 16:01:39,986 [output.notifier] INFO: 推送完成: 1/2 通道成功
+2026-05-02 16:01:39,986 [output.realtime_pusher] INFO: [实时推送] S级 退市风险  → 1/2 通道成功
+2026-05-02 16:01:39,987 [output.notifier] WARNING: QQ 未配置（缺少 QQ_API_URL 或 QQ_TARGET）
+2026-05-02 16:01:40,431 [output.notifier] INFO: 飞书推送成功
+2026-05-02 16:01:40,433 [output.notifier] INFO: 推送完成: 1/2 通道成功
+2026-05-02 16:01:40,433 [output.realtime_pusher] INFO: [实时推送] S级 立案调查  → 1/2 通道成功
+2026-05-02 16:01:40,433 [output.notifier] WARNING: QQ 未配置（缺少 QQ_API_URL 或 QQ_TARGET）
+2026-05-02 16:01:40,856 [output.notifier] INFO: 飞书推送成功
+2026-05-02 16:01:40,858 [output.notifier] INFO: 推送完成: 1/2 通道成功
+2026-05-02 16:01:40,858 [output.realtime_pusher] INFO: [实时推送] S级 财务造假  → 1/2 通道成功
+2026-05-02 16:01:40,858 [output.notifier] WARNING: QQ 未配置（缺少 QQ_API_URL 或 QQ_TARGET）
+2026-05-02 16:01:41,292 [output.notifier] INFO: 飞书推送成功
+2026-05-02 16:01:41,294 [output.notifier] INFO: 推送完成: 1/2 通道成功
+2026-05-02 16:01:41,295 [output.realtime_pusher] INFO: [实时推送] A级 高管减持  → 1/2 通道成功
+2026-05-02 16:01:41,295 [output.notifier] WARNING: QQ 未配置（缺少 QQ_API_URL 或 QQ_TARGET）
+2026-05-02 16:01:41,827 [output.notifier] INFO: 飞书推送成功
+2026-05-02 16:01:41,829 [output.notifier] INFO: 推送完成: 1/2 通道成功
+2026-05-02 16:01:41,829 [output.realtime_pusher] INFO: [实时推送] A级 业绩变脸  → 1/2 通道成功
+2026-05-02 16:01:41,829 [output.notifier] WARNING: QQ 未配置（缺少 QQ_API_URL 或 QQ_TARGET）
+2026-05-02 16:01:42,304 [output.notifier] INFO: 飞书推送成功
+2026-05-02 16:01:42,305 [output.notifier] INFO: 推送完成: 1/2 通道成功
+2026-05-02 16:01:42,305 [output.realtime_pusher] INFO: [实时推送] A级 业绩预增  → 1/2 通道成功
+2026-05-02 16:01:42,305 [output.realtime_pusher] INFO:   → 本次推送 6 条事件
+2026-05-02 16:01:52,464 [output.notifier] WARNING: QQ 未配置（缺少 QQ_API_URL 或 QQ_TARGET）
+2026-05-02 16:01:52,919 [output.notifier] INFO: 飞书推送成功
+2026-05-02 16:01:52,921 [output.notifier] INFO: 推送完成: 1/2 通道成功
+2026-05-02 16:01:52,922 [output.realtime_pusher] INFO: [实时推送] S级 退市风险  → 1/2 通道成功
+2026-05-02 16:01:52,922 [output.notifier] WARNING: QQ 未配置（缺少 QQ_API_URL 或 QQ_TARGET）
+2026-05-02 16:01:53,363 [output.notifier] INFO: 飞书推送成功
+2026-05-02 16:01:53,365 [output.notifier] INFO: 推送完成: 1/2 通道成功
+2026-05-02 16:01:53,365 [output.realtime_pusher] INFO: [实时推送] S级 财务造假  → 1/2 通道成功
+2026-05-02 16:01:53,365 [output.notifier] WARNING: QQ 未配置（缺少 QQ_API_URL 或 QQ_TARGET）
+2026-05-02 16:01:53,842 [output.notifier] INFO: 飞书推送成功
+2026-05-02 16:01:53,844 [output.notifier] INFO: 推送完成: 1/2 通道成功
+2026-05-02 16:01:53,844 [output.realtime_pusher] INFO: [实时推送] A级 业绩预增  → 1/2 通道成功
+2026-05-02 16:01:53,844 [output.realtime_pusher] INFO:   → 本次推送 3 条事件

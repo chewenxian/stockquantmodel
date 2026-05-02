@@ -90,26 +90,9 @@ class StockHotCollector(BaseCollector):
                     if not stock_code:
                         continue
 
-                    # 热度排名
-                    rank = item.get("rk", 0) or 0
-                    try:
-                        rank = int(rank)
-                    except (ValueError, TypeError):
-                        rank = 0
-
-                    # 热度值
-                    hot_score = item.get("hs", 0) or 0
-                    try:
-                        hot_score = float(hot_score)
-                    except (ValueError, TypeError):
-                        hot_score = 0.0
-
-                    # 涨跌幅
-                    change_pct = item.get("pct", 0) or 0
-                    try:
-                        change_pct = float(change_pct)
-                    except (ValueError, TypeError):
-                        change_pct = 0.0
+                    rank = int(item.get("rk", 0) or 0)
+                    hot_score = float(item.get("hs", 0) or 0)
+                    change_pct = float(item.get("pct", 0) or 0)
 
                     # 去重：同日同股不重复插入
                     existing = conn.execute(
@@ -125,13 +108,13 @@ class StockHotCollector(BaseCollector):
                             ) VALUES(?, ?, ?, ?, ?, ?)
                         """, (stock_code, stock_name, rank,
                               hot_score, change_pct, today))
-                        conn.commit()
                         count += 1
 
                 except (ValueError, TypeError) as e:
                     logger.warning(f"[股票热度] 解析异常: {e}")
                     continue
 
+            conn.commit()
             conn.close()
             results["stock_hot"] = count
             logger.info(f"[股票热度] 采集完成，新增 {count} 条")

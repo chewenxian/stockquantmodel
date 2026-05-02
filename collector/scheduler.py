@@ -1,9 +1,15 @@
 """
 采集调度器：统一管理所有数据源的采集任务
-支持全量采集和增量采集
+支持全量采集、增量采集、并行采集
+
+v2.0 优化：
+- 并行采集：collect_all() 使用 ThreadPoolExecutor 并发执行 I/O 密集型采集器
+- 增量跳过：采集前检查 should_fetch()，避免无效请求
+- 智能分组：行情/新闻类高频采集器优先并行，历史K线等低频采集器单独调度
 """
 import logging
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Optional
 import yaml
 
@@ -26,10 +32,21 @@ from collector.spiders.margin_trading import MarginTradingCollector
 from collector.spiders.guba_sentiment import GubaSentimentCollector
 from collector.spiders.bond_yield import BondYieldCollector
 from collector.spiders.stock_hot import StockHotCollector
+from collector.spiders.iwencai_boards import IwencaiBoardCollector
 from collector.fallback import FallbackChain
 from output.realtime_pusher import RealtimePusher
 
 logger = logging.getLogger(__name__)
+
+# 高频采集器（新闻/行情）：每次采集都执行，并行度高
+_HIGH_FREQ = {"东方财富", "新浪财经", "雪球", "同花顺快讯", "证券时报",
+              "政策宏观", "金十数据", "政府政策"}
+
+# 中频采集器（资金/情绪）：可按增量间隔跳过
+_MID_FREQ = {"北向资金", "融资融券", "股吧情绪", "国债收益率", "股票热度", "问财板块"}
+
+# 低频采集器（历史K线）：单独调度，避免阻塞主流程
+_LOW_FREQ = {"历史K线", "巨潮资讯", "上交所公告", "深交所公告", "北交所公告"}
 
 
 class CollectScheduler:
@@ -109,41 +126,109 @@ class CollectScheduler:
         if sources.get("stock_hot", True):
             self.collectors["股票热度"] = StockHotCollector(self.db, proxy)
 
-        # 问财 iwencai 数据源（需要 IWENCAI_API_KEY 环境变量）
-        # ⚠️ 不在每日采集中调用，而是在 analyze_stock 中按需调用
-        # 见 analyzer/stock_analyzer.py _fetch_iwencai_data()
+        # 问财板块数据（需要 IWENCAI_API_KEY 环境变量）
+        # 替代被封锁的 push2 API，提供板块排行+资金流向
+        if os.environ.get("IWENCAI_API_KEY"):
+            self.collectors["问财板块"] = IwencaiBoardCollector(self.db, proxy)
 
-        logger.info(f"采集器初始化完成: {list(self.collectors.keys())}")
+        logger.info(f"采集器初始化完成: {list(self.collectors.keys())} ({len(self.collectors)}个)")
 
     def _load_config(self, path: str) -> dict:
         with open(path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f)
 
-    def collect_all(self) -> Dict[str, Dict[str, int]]:
-        """全量采集：运行所有采集器"""
+    def _run_one_collector(self, name: str, collector) -> tuple:
+        """
+        运行单个采集器，处理异常和日志
+        返回 (name, result_dict)
+        """
+        try:
+            # 增量跳过检查（中/低频采集器可跳过）
+            if name in _MID_FREQ:
+                min_interval = {"北向资金": 60, "融资融券": 60, "股吧情绪": 30,
+                                 "国债收益率": 120, "股票热度": 60}.get(name, 30)
+                if hasattr(collector, 'should_fetch') and callable(collector.should_fetch):
+                    if not collector.should_fetch(min_interval_minutes=min_interval):
+                        logger.info(f"[{name}] 间隔未到，跳过本次采集")
+                        return name, {"skipped": True}
+            elif name in _LOW_FREQ:
+                if hasattr(collector, 'should_fetch') and callable(collector.should_fetch):
+                    if not collector.should_fetch(min_interval_minutes=120):
+                        logger.info(f"[{name}] 间隔未到，跳过本次采集")
+                        return name, {"skipped": True}
+
+            logger.info(f"[{name}] 开始采集...")
+            results = collector.collect()
+            logger.info(f"[{name}] 采集完成: {results}")
+            # 记录采集日志
+            if isinstance(results, dict):
+                for data_type, count in results.items():
+                    if isinstance(count, int) and data_type != "error":
+                        self.db.log_collect(name, data_type, count=count, status="success")
+            elif isinstance(results, int):
+                self.db.log_collect(name, "all", count=results, status="success")
+            # 标记采集时间
+            if hasattr(collector, 'mark_fetched') and callable(collector.mark_fetched):
+                if isinstance(results, dict):
+                    total = sum(v for v in results.values() if isinstance(v, int))
+                    collector.mark_fetched(item_count=total)
+                elif isinstance(results, int):
+                    collector.mark_fetched(item_count=results)
+            return name, results
+        except Exception as e:
+            logger.error(f"[{name}] 采集失败: {e}", exc_info=True)
+            error_dict = {"error": str(e)[:200]}
+            self.db.log_collect(name, "all", status="error", error_msg=str(e)[:200])
+            if hasattr(collector, 'mark_fetched') and callable(collector.mark_fetched):
+                collector.mark_fetched(error=str(e)[:200])
+            return name, error_dict
+
+    def collect_all(self, max_workers: int = 5) -> Dict[str, Dict[str, int]]:
+        """
+        全量采集：并发执行所有采集器
+
+        Args:
+            max_workers: 最大并行数（默认5，可根据网络带宽调整）
+
+        Returns:
+            {采集器名: {指标: 数量}}
+        """
         results = {}
         start_time = datetime.now()
-        logger.info(f"===== 开始全量采集: {start_time.strftime('%Y-%m-%d %H:%M')} =====")
+        logger.info(f"===== 开始全量采集 (并行={max_workers}): {start_time.strftime('%Y-%m-%d %H:%M')} =====")
 
-        for name, collector in self.collectors.items():
-            try:
-                logger.info(f"[{name}] 开始采集...")
-                collector_results = collector.collect()
-                results[name] = collector_results
-                logger.info(f"[{name}] 采集完成: {collector_results}")
-                # 记录采集日志
-                if isinstance(collector_results, dict):
-                    for data_type, count in collector_results.items():
-                        self.db.log_collect(name, data_type, count=count if isinstance(count, int) else 0, status="success")
-                else:
-                    self.db.log_collect(name, "all", count=collector_results if isinstance(collector_results, int) else 0, status="success")
-            except Exception as e:
-                logger.error(f"[{name}] 采集失败: {e}", exc_info=True)
-                results[name] = {"error": str(e)}
-                self.db.log_collect(name, "all", status="error", error_msg=str(e)[:200])
+        # 高频采集器并行执行
+        high_freq_collectors = {n: c for n, c in self.collectors.items() if n in _HIGH_FREQ}
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(high_freq_collectors) or 1)) as executor:
+            futures = {executor.submit(self._run_one_collector, n, c): n
+                       for n, c in high_freq_collectors.items()}
+            for future in as_completed(futures):
+                name, result = future.result()
+                results[name] = result
+
+        # 中频采集器并行执行（和上一批串行，但组内并行）
+        mid_freq_collectors = {n: c for n, c in self.collectors.items() if n in _MID_FREQ}
+        if mid_freq_collectors:
+            with ThreadPoolExecutor(max_workers=min(3, len(mid_freq_collectors))) as executor:
+                futures = {executor.submit(self._run_one_collector, n, c): n
+                           for n, c in mid_freq_collectors.items()}
+                for future in as_completed(futures):
+                    name, result = future.result()
+                    results[name] = result
+
+        # 低频采集器（历史K线、公告等）串行执行，避免对目标服务器造成压力
+        for name in _LOW_FREQ:
+            c = self.collectors.get(name)
+            if c:
+                _, result = self._run_one_collector(name, c)
+                results[name] = result
 
         elapsed = (datetime.now() - start_time).total_seconds()
-        logger.info(f"===== 全量采集完成, 耗时 {elapsed:.1f}s =====")
+        total_items = sum(
+            sum(v for v in r.values() if isinstance(v, (int, float)) and v != 0)
+            for r in results.values() if isinstance(r, dict)
+        )
+        logger.info(f"===== 全量采集完成, 共约 {total_items:.0f} 条, 耗时 {elapsed:.1f}s =====")
         return results
 
     def collect_with_push(self, use_fallback: bool = True) -> Dict[str, int]:
