@@ -32,10 +32,14 @@ class RealtimePusher:
     
     只推送自选股（is_watched=1）的重要事件，
     按需分析的个股不会触发推送。
+    只推送24h内发布的最新消息，旧闻记录但不推送。
     
     集成到采集流程中：采集完成后调用 check_new_events() 检查是否有需要立即推送的事件。
     也可独立运行：python main.py watch → 每30秒轮询一次数据库。
     """
+
+    # 只推送24小时内发布的最新消息
+    MAX_NEWS_AGE_HOURS = 24
 
     # 需要秒级推送的事件类型（按严重程度排序）
     CRITICAL_EVENTS = {
@@ -83,6 +87,21 @@ class RealtimePusher:
                 self.db = Database("data/stock_news.db")
             except Exception as e:
                 logger.warning(f"初始化数据库失败: {e}")
+
+    def _is_stale_news(self, published_at: str) -> bool:
+        """
+        判断新闻是否过时（超过 MAX_NEWS_AGE_HOURS 小时不推送）
+        """
+        if not published_at:
+            return False
+        try:
+            if len(published_at) >= 10:
+                pub_time = datetime.fromisoformat(published_at[:19])
+                age_hours = (datetime.now() - pub_time).total_seconds() / 3600
+                return age_hours > self.MAX_NEWS_AGE_HOURS
+        except (ValueError, TypeError):
+            pass
+        return False
 
     def _load_watched_stocks(self):
         """加载自选股列表（只推送自选股的事件）"""
@@ -213,6 +232,12 @@ class RealtimePusher:
 
             for row in rows:
                 ann = dict(row)
+
+                # 时间过滤：过时公告不推送
+                if self._is_stale_news(ann.get("publish_date", "")):
+                    logger.debug(f"[时间过滤] 旧公告跳过推送: {ann.get('title', '')[:40]}...")
+                    continue
+
                 detected = self._detect_events_from_text(
                     ann.get("title", ""),
                     f"{ann.get('summary', '')} {ann.get('announce_type', '')}",
@@ -284,6 +309,11 @@ class RealtimePusher:
 
                 # 只推送自选股（非自选股即使有重大事件也不推）
                 if not codes or not any(c in self._watched_codes for c in codes):
+                    continue
+
+                # 时间过滤：超过 MAX_NEWS_AGE_HOURS 的旧闻不推送
+                if self._is_stale_news(item.get("published_at", "")):
+                    logger.debug(f"[时间过滤] 旧闻跳过推送: {item['title'][:40]}...")
                     continue
 
                 detected = self._detect_events_from_text(
