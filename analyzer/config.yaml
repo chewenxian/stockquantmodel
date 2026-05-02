@@ -14,9 +14,9 @@ schedule:
 
 # LLM 调用参数
 llm:
-  max_tokens: 2048
+  max_tokens: 4096          # 增强版分析需要更多token
   temperature: 0.3          # 较低温度保证分析一致性
-  timeout: 30               # API 超时秒数
+  timeout: 45               # API 超时秒数（增强分析可能更慢）
   retry_times: 3            # 失败重试次数
   retry_delay: 2            # 重试间隔秒数
 
@@ -26,13 +26,12 @@ sentiment:
   anomaly_threshold: 0.6    # 异常检测阈值（情绪突变幅度）
   min_news_for_analysis: 1  # 最少新闻数才生成分析
 
-# 建议参数
+# 建议参数（v8.1 升级为3-tier体系）
 advice:
   min_confidence: 0.3       # 最低置信度才生成建议
-  strong_buy_threshold: 0.7  # 强烈买入情绪阈值
-  buy_threshold: 0.3        # 买入情绪阈值
-  sell_threshold: -0.3      # 卖出情绪阈值
-  strong_sell_threshold: -0.7 # 强烈卖出情绪阈值
+  focus_threshold: 0.2      # 重点关注情绪阈值
+  caution_threshold: -0.2   # 谨慎持有最低阈值
+  # 低于 caution_threshold 则为 规避
 
 # 报告格式
 report:

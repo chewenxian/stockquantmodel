@@ -182,29 +182,72 @@ class NLPAnalyzer:
 
     @property
     def _news_analysis_system_prompt(self) -> str:
-        """新闻情绪分析的系统提示词"""
+        """新闻分析系统提示词（增强版：板块归因 + 影响时效 + 主题聚类）"""
         return """你是一位专业的A股市场分析师，拥有10年以上的行业经验。
-你的任务是分析一组财经新闻，输出结构化的分析结果。
+你的任务是分析一组财经新闻，输出结构化的多维分析结果。
 
-工作要求：
+## 工作要求
 1. 只分析事实，不主观臆断
 2. 对每条新闻给出客观的情绪评分
-3. 关注对股价的实质性影响
-4. 输出格式严格为 JSON
-5. 使用中文输出
+3. 标注涉及的具体板块（申万行业分类）
+4. 判断影响的时效长短
+5. 识别新闻间的主题关联
+6. 输出格式严格为 JSON，使用中文
 
-评分标准：
-- 情绪评分 (-1.0 ~ 1.0):
-  正数 = 利好（业绩增长、重大合同、政策利好、行业涨价等）
-  负数 = 利空（业绩亏损、减持、立案调查、行业利空等）
-  接近0 = 中性（常规公告、行业动态等）
+## 评分标准
 
-- 影响程度 (1~5):
-  1 = 轻微影响
-  2 = 一般影响
-  3 = 中等影响
-  4 = 重大影响
-  5 = 决定性影响"""
+### 情绪评分 (-1.0 ~ 1.0)
+- 正数 = 利好（业绩增长、重大合同、政策利好、行业涨价、中标、回购等）
+- 负数 = 利空（业绩亏损、减持、立案调查、行业利空、诉讼、退市风险等）
+- 接近0 = 中性（常规公告、行业动态、例行报道）
+
+### 影响程度 (1~5)
+- 1 = 轻微影响（常规新闻、行业日常）
+- 2 = 一般影响（中小级别合同、人事变动）
+- 3 = 中等影响（业绩预增/预亏、中标重大合同）
+- 4 = 重大影响（业绩变脸、重组、立案调查、行业政策重大变化）
+- 5 = 决定性影响（退市风险、财务造假、控制权变更、行业颠覆性政策）
+
+### 影响时效
+- "短期" = 当日或1-2个交易日内反映
+- "中期" = 1-4周内逐步消化
+- "长期" = 影响一个季度以上
+
+### 板块归属（申万行业分类）
+从标准申万一级/二级行业中选取最相关的一个，如：
+- 电子/半导体、电力设备/锂电池、食品饮料/白酒
+- 医药生物/创新药、计算机/AI、汽车/新能源汽车
+- 机械设备、基础化工、有色金属、国防军工、银行、非银金融
+- 房地产、建筑装饰、公用事业、交通运输、通信、传媒等
+
+如果涉及多个板块，选取最主要的1-2个。"""
+
+    @property
+    def _news_analysis_output_schema(self) -> str:
+        """增强版输出格式定义"""
+        return """输出格式（严格的 JSON，不要其他文字）：
+{
+    "summary": "整体分析摘要（50-100字，包含情绪判断和核心逻辑）",
+    "avg_sentiment": 0.0,
+    "sentiment_label": "偏多/偏空/中性",
+    "primary_sectors": ["电子/半导体", "电力设备"],
+    "dominant_theme": "业绩驱动/政策利好/行业涨价/减持利空/题材炒作/中性",
+    "impact_timing": "短期/中期/长期",
+    "key_topics": ["事件1", "事件2"],
+    "items": [
+        {
+            "title": "新闻标题",
+            "sentiment": 0.5,
+            "impact": 3,
+            "sector": "板块名称",
+            "timing": "短期",
+            "reasoning": "判断理由（20字内）"
+        }
+    ],
+    "risk_warnings": ["风险1"],
+    "opportunities": ["机会1"],
+    "cross_correlation": "各新闻间关联分析（30字），如：'业绩预告与中标公告相互印证，强化利好信号'"
+}"""
 
     @property
     def _report_system_prompt(self) -> str:
@@ -231,15 +274,22 @@ class NLPAnalyzer:
 3. 资金流向：主力资金、北向资金动向
 4. 市场环境：整体市场氛围
 
-建议等级（按强度递减）：
-- 强烈买入：确定性强，多重利好共振，适合重仓
-- 买入：利好偏多，风险可控，适合建仓/加仓
-- 持有：当前持有观望，无明显买入或卖出信号
-- 观望：不确定性高，等待更明确的信号
-- 卖出：利空偏多，风险上升，建议减仓
-- 强烈卖出：多重利空，建议清仓止损
+## 建议等级
+- **重点关注**：利好信号明确，多个维度共振，适合积极关注或建仓
+- **谨慎持有**：中性偏多或中性，当前可持有但不宜加仓，等待进一步信号
+- **规避**：利空因素明显，风险上升，建议减仓或规避
 
-输出格式为 JSON，包含：suggestion, reason, risk_level, confidence"""
+## 输出格式（严格的 JSON）
+{
+    "suggestion": "重点关注/谨慎持有/规避",
+    "reason": "建议理由（30-50字）",
+    "risk_level": "高/中/低",
+    "confidence": 0.8,
+    "operation": "具体操作建议",
+    "key_driver": "核心驱动因素（如：业绩增长/政策利好/行业下行等）",
+    "stop_loss": "止损建议",
+    "target": "目标位（如适用）"
+}"""
 
     # ──────────────────────────────────────────
     # 核心分析方法
@@ -259,20 +309,26 @@ class NLPAnalyzer:
 
         Returns:
             {
-                "summary": str,                  # 整体摘要
-                "avg_sentiment": float,           # 平均情绪 -1~1
-                "sentiment_label": str,           # 情绪标签
-                "key_topics": List[str],          # 关键事件/主题
-                "items": [                        # 逐条分析
+                "summary": str,                      # 整体摘要
+                "avg_sentiment": float,               # 平均情绪 -1~1
+                "sentiment_label": str,               # 偏多/偏空/中性
+                "primary_sectors": List[str],         # 涉及板块（申万行业）
+                "dominant_theme": str,               # 主导主题类型
+                "impact_timing": str,                # 影响时效
+                "key_topics": List[str],              # 关键事件/主题
+                "items": [                            # 逐条分析
                     {
                         "title": str,
                         "sentiment": float,
                         "impact": int (1-5),
+                        "sector": str,               # 本条涉及板块
+                        "timing": str,               # 影响时效
                         "reasoning": str
                     }
                 ],
-                "risk_warnings": List[str],       # 风险提示
-                "opportunities": List[str]        # 机会提示
+                "cross_correlation": str,            # 新闻间关联分析
+                "risk_warnings": List[str],           # 风险提示
+                "opportunities": List[str]            # 机会提示
             }
         """
         if not news_list:
@@ -329,23 +385,7 @@ class NLPAnalyzer:
 {chr(10).join(news_texts)}
 ---
 
-输出格式（严格的 JSON，不要其他文字）：
-{{
-    "summary": "整体分析摘要（50-100字）",
-    "avg_sentiment": 0.0,
-    "sentiment_label": "偏多/偏空/中性",
-    "key_topics": ["事件1", "事件2"],
-    "items": [
-        {{
-            "title": "新闻标题",
-            "sentiment": 0.5,
-            "impact": 3,
-            "reasoning": "判断理由（20字内）"
-        }}
-    ],
-    "risk_warnings": ["风险1"],
-    "opportunities": ["机会1"]
-}}"""
+{self._news_analysis_output_schema}"""
 
         content = self._call_api(
             messages=[{"role": "user", "content": user_prompt}],
@@ -380,12 +420,16 @@ class NLPAnalyzer:
                 else:
                     result = self._rule_based_fallback(news_list)
 
-        # 确保关键字段存在
+        # 确保关键字段存在（含增强版字段）
         result.setdefault("summary", "AI分析完成")
         result.setdefault("avg_sentiment", 0.0)
         result.setdefault("sentiment_label", "中性")
+        result.setdefault("primary_sectors", [])
+        result.setdefault("dominant_theme", "中性")
+        result.setdefault("impact_timing", "短期")
         result.setdefault("key_topics", [])
         result.setdefault("items", [])
+        result.setdefault("cross_correlation", "")
         result.setdefault("risk_warnings", [])
         result.setdefault("opportunities", [])
 
@@ -399,9 +443,9 @@ class NLPAnalyzer:
 
         # 基础情绪词典
         positive_words = ["增长", "大涨", "突破", "利好", "盈利", "分红", "中标",
-                          "合同", "扩产", "创新高", "买入", "增持", "回购"]
+                          "合同", "扩产", "创新高", "买入", "增持", "回购", "预增"]
         negative_words = ["下跌", "亏损", "减持", "立案", "处罚", "利空", "风险",
-                          "下调", "降级", "违约", "诉讼", "ST", "退市"]
+                          "下调", "降级", "违约", "诉讼", "ST", "退市", "预亏", "下滑"]
 
         for news in news_list:
             title = news.get("title", "")
@@ -427,6 +471,8 @@ class NLPAnalyzer:
                 "title": title,
                 "sentiment": round(score, 2),
                 "impact": 2 if abs(score) > 0.3 else 1,
+                "sector": "",
+                "timing": "短期",
                 "reasoning": "基于规则判断" if abs(score) > 0.1 else "无明显情绪"
             })
             sentiment_sum += score
@@ -444,8 +490,12 @@ class NLPAnalyzer:
             "summary": f"分析了{len(news_list)}条相关新闻，整体情绪{label}",
             "avg_sentiment": round(avg_sentiment, 2),
             "sentiment_label": label,
+            "primary_sectors": [],
+            "dominant_theme": label,
+            "impact_timing": "短期",
             "key_topics": list(keywords)[:10],
             "items": items,
+            "cross_correlation": "",
             "risk_warnings": ["注意市场风险"] if avg_sentiment < 0 else [],
             "opportunities": ["关注市场机会"] if avg_sentiment > 0 else []
         }

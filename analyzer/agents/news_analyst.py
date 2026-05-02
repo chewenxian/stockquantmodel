@@ -44,6 +44,21 @@ class NewsAnalyst(BaseAnalyst):
                 report.key_findings = llm_result.get("key_topics", [])
                 report.risk_factors = llm_result.get("risk_warnings", [])
                 report.opportunities = llm_result.get("opportunities", [])
+
+                # 增强字段：板块归因 + 时效 + 主题
+                sectors = llm_result.get("primary_sectors", [])
+                if sectors:
+                    report.key_findings.insert(0, f"涉及板块: {'/'.join(sectors)}")
+                theme = llm_result.get("dominant_theme", "")
+                if theme:
+                    report.key_findings.append(f"主导主题: {theme}")
+                timing = llm_result.get("impact_timing", "")
+                if timing:
+                    report.details["impact_timing"] = timing
+                cross = llm_result.get("cross_correlation", "")
+                if cross:
+                    report.details["cross_correlation"] = cross
+
                 # 置信度 = 新闻数量归一化 + 情绪强度
                 news_score = min(len(news_items) / 20, 1.0) * 0.4
                 sentiment_strength = abs(report.sentiment) * 0.6

@@ -11,8 +11,14 @@ logger = logging.getLogger(__name__)
 class ResearchManager(BaseAnalyst):
     """研究主管：汇总所有分析报告，生成最终投资建议"""
 
-    # 5-tier 评级
-    RATINGS = ["买入", "增持", "持有", "减持", "卖出"]
+    # 3-tier 建议体系（更简洁实用）
+    RATINGS = ["重点关注", "谨慎持有", "规避"]
+    # 对应旧的5-tier映射（兼容）
+    RATING_MAP = {
+        "重点关注": {"emoji": "🟢", "action": "积极关注或建仓"},
+        "谨慎持有": {"emoji": "⚪", "action": "持有观望，不宜加仓"},
+        "规避":     {"emoji": "🔴", "action": "减仓或规避风险"},
+    }
 
     def __init__(self, db=None, nlp=None):
         super().__init__(db, nlp)
@@ -75,8 +81,9 @@ class ResearchManager(BaseAnalyst):
         final_score = total_score / max(total_weight, 0.01)
         final_score = max(min(final_score, 1.0), -1.0)
 
-        # 确定5-tier评级
+        # 确定3-tier建议
         rating, rating_score = self._get_rating(final_score)
+        rating_info = self.RATING_MAP.get(rating, {})
         report.sentiment = final_score
         report.confidence = min(total_weight, 1.0)
         report.key_findings = list(dict.fromkeys(findings))[:5]
@@ -85,13 +92,24 @@ class ResearchManager(BaseAnalyst):
 
         report.details["rating"] = rating
         report.details["rating_score"] = rating_score
+        report.details["rating_action"] = rating_info.get("action", "")
+        report.details["rating_emoji"] = rating_info.get("emoji", "")
         report.details["analyst_scores"] = {
             r.analyst_name: {"sentiment": r.sentiment, "confidence": r.confidence}
             for r in analyst_reports
         }
 
+        # 添加时效标签
+        timings = [
+            r.details.get("impact_timing", "")
+            for r in analyst_reports if hasattr(r, "details") and r.details.get("impact_timing")
+        ]
+        if timings:
+            report.details["impact_timing"] = max(set(timings), key=timings.count)
+
+        emoji = rating_info.get("emoji", "")
         report.summary = (
-            f"综合评级: **{rating}** (分项: " +
+            f"综合评级: **{emoji} {rating}** (分项: " +
             ", ".join([
                 f"{r.analyst_name}={r.sentiment:+.2f}" for r in analyst_reports
             ]) + ")"
@@ -103,14 +121,15 @@ class ResearchManager(BaseAnalyst):
         return report
 
     def _get_rating(self, score: float) -> tuple:
-        """将综合评分映射到5-tier评级"""
-        if score > 0.5:
-            return self.RATINGS[0], 2      # 买入
-        elif score > 0.15:
-            return self.RATINGS[1], 1      # 增持
-        elif score > -0.15:
-            return self.RATINGS[2], 0      # 持有
-        elif score > -0.5:
-            return self.RATINGS[3], -1     # 减持
+        """将综合评分映射到3-tier建议体系
+
+        重点关注: 明确利好信号，多重维度共振
+        谨慎持有: 中性偏多或偏空，观望等待信号
+        规避:     风险因素明显，建议减仓
+        """
+        if score > 0.2:
+            return self.RATINGS[0], 1      # 重点关注
+        elif score > -0.2:
+            return self.RATINGS[1], 0      # 谨慎持有
         else:
-            return self.RATINGS[4], -2     # 卖出
+            return self.RATINGS[2], -1     # 规避
