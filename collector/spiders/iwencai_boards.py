@@ -83,6 +83,13 @@ class IwencaiBoardCollector(BaseCollector):
             logger.error(f"[问财板块] 资金流出采集异常: {e}")
             results["fund_outflow"] = 0
 
+        # 6. 龙虎榜
+        try:
+            results["dragon_tiger"] = self._query_dragon_tiger("今日龙虎榜净买入前20的个股")
+        except Exception as e:
+            logger.error(f"[问财板块] 龙虎榜采集异常: {e}")
+            results["dragon_tiger"] = 0
+
         total = sum(v for v in results.values() if isinstance(v, int))
         logger.info(f"[问财板块] 采集完成: {results}, 总计 {total} 条")
         return results
@@ -204,6 +211,46 @@ class IwencaiBoardCollector(BaseCollector):
                 logger.debug(f"[问财板块] 资金流入库异常: {e}")
 
         logger.info(f"[问财板块] {query_text[:20]} → 入库 {count} 条")
+        return count
+
+    def _query_dragon_tiger(self, query_text: str) -> int:
+        """查询龙虎榜数据并写入 dragon_tiger 表"""
+        items = self._run_query(query_text, limit=20)
+        if not items:
+            return 0
+
+        count = 0
+        today = datetime.now().strftime("%Y-%m-%d")
+        for item in items:
+            try:
+                stock_code = str(item.get("股票代码", "")).replace(".SH", "").replace(".SZ", "")
+                stock_name = str(item.get("股票简称", ""))
+                reason = str(item.get("上榜原因", ""))
+                board_type = str(item.get("榜单类型", ""))
+
+                # 净买入额
+                net_amount = self._extract_money_field(item, "净买入额")
+                buy_amount = self._extract_money_field(item, "买入额")
+                sell_amount = self._extract_money_field(item, "卖出额")
+
+                if not stock_code:
+                    continue
+
+                conn = self.db._connect()
+                conn.execute("""
+                    INSERT INTO dragon_tiger(
+                        stock_code, trade_date, buy_amount, sell_amount,
+                        net_amount, reason, created_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, datetime('now'))
+                """, (stock_code, today, buy_amount, sell_amount,
+                      net_amount, f"{reason} {board_type}"))
+                conn.commit()
+                self.db._close(conn)
+                count += 1
+            except Exception as e:
+                logger.debug(f"[问财板块] 龙虎榜入库异常: {e}")
+
+        logger.info(f"[问财板块] 龙虎榜 → 入库 {count} 条")
         return count
 
     @staticmethod

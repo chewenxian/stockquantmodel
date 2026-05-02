@@ -4037,3 +4037,6 @@ utils.logging_ext.CollectorError: 采集请求失败: https://push2ex.eastmoney.
 2026-05-02 16:01:53,844 [output.notifier] INFO: 推送完成: 1/2 通道成功
 2026-05-02 16:01:53,844 [output.realtime_pusher] INFO: [实时推送] A级 业绩预增  → 1/2 通道成功
 2026-05-02 16:01:53,844 [output.realtime_pusher] INFO:   → 本次推送 3 条事件
+2026-05-02 17:15:20,753 [output.realtime_pusher] INFO: 🚨 实时监控启动: 每 10s 轮询一次
+2026-05-02 17:15:20,753 [output.realtime_pusher] INFO:    推送通道: qq, feishu
+2026-05-02 17:15:20,753 [output.realtime_pusher] INFO:    上次处理: news_id=6013, announcement_id=0
