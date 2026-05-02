@@ -3992,3 +3992,6 @@ utils.logging_ext.CollectorError: 采集请求失败: https://push2ex.eastmoney.
 2026-05-02 13:15:21,661 [output.realtime_pusher] INFO: 🚨 实时监控启动: 每 10s 轮询一次
 2026-05-02 13:15:21,661 [output.realtime_pusher] INFO:    推送通道: qq, feishu
 2026-05-02 13:15:21,661 [output.realtime_pusher] INFO:    上次处理: news_id=4899, announcement_id=0
+2026-05-02 13:26:01,880 [output.realtime_pusher] INFO: 🚨 实时监控启动: 每 10s 轮询一次
+2026-05-02 13:26:01,880 [output.realtime_pusher] INFO:    推送通道: qq, feishu
+2026-05-02 13:26:01,880 [output.realtime_pusher] INFO:    上次处理: news_id=4899, announcement_id=0

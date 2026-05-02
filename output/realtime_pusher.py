@@ -64,6 +64,11 @@ class RealtimePusher:
         self._last_announcement_id = 0
         self._load_last_ids()
 
+        # 防重复推送缓存：{event_key: push_time}
+        # 相同事件+股票 5 分钟内不再重复推送
+        self._push_cache = {}
+        self._DEDUP_WINDOW = 300
+
     def _init_db(self):
         """延迟加载数据库"""
         if self.db is None:
@@ -329,7 +334,7 @@ class RealtimePusher:
 
     def push_event(self, event: Dict) -> Dict[str, bool]:
         """
-        推送一条事件到所有通道
+        推送一条事件到所有通道（含防重复缓存）
 
         Args:
             event: 事件字典
@@ -337,6 +342,20 @@ class RealtimePusher:
         Returns:
             {channel: success}
         """
+        # 防重复：相同事件类型+股票+标题 5分钟内不重复推
+        dedup_key = f"{event.get('event_type')}|{event.get('stock_code')}|{event.get('title','')[:50]}"
+        now = time.time()
+        last_push = self._push_cache.get(dedup_key, 0)
+        if now - last_push < self._DEDUP_WINDOW:
+            logger.debug(f"[防重复] 跳过已推送的事件: {dedup_key[:60]}")
+            return {ch: False for ch in self.PUSH_CHANNELS}
+        self._push_cache[dedup_key] = now
+
+        # 清理过期缓存
+        expired = [k for k, t in self._push_cache.items() if now - t > self._DEDUP_WINDOW]
+        for k in expired:
+            self._push_cache.pop(k, None)
+
         message = self._build_alert_message(event)
         results = self.notifier.push_report(message, channels=self.PUSH_CHANNELS)
         return results
@@ -362,10 +381,12 @@ class RealtimePusher:
             return 0
 
         # 去重：同一事件类型+股票+标题合并
+        # （标题前50字相同视为同一事件，防不同来源的重复推送）
         seen = set()
         unique_events = []
         for evt in all_events:
-            key = (evt.get("event_type", ""), evt.get("stock_code", ""), evt.get("item_id", 0))
+            title_key = (evt.get("title", "") or "")[:50]
+            key = (evt.get("event_type", ""), evt.get("stock_code", ""), title_key)
             if key not in seen:
                 seen.add(key)
                 unique_events.append(evt)

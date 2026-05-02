@@ -87,6 +87,8 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_news_published ON news(published_at DESC);
             CREATE INDEX IF NOT EXISTS idx_news_source ON news(source);
 
+
+
             -- 3. 新闻-股票关联 + 情感分析
             CREATE TABLE IF NOT EXISTS news_stocks (
                 news_id INTEGER NOT NULL,
@@ -415,6 +417,10 @@ class Database:
             ("ALTER TABLE announcements ADD COLUMN category TEXT DEFAULT '其他'",
              "SELECT category FROM announcements LIMIT 1"),
 
+            # news 表 - title_hash 去重字段（v7.1 新增）
+            ("ALTER TABLE news ADD COLUMN title_hash TEXT DEFAULT ''",
+             "SELECT title_hash FROM news LIMIT 1"),
+
             # news 表 - 可信度字段（v7.0 新增）
             ("ALTER TABLE news ADD COLUMN credibility_tag TEXT DEFAULT ''",
              "SELECT credibility_tag FROM news LIMIT 1"),
@@ -434,6 +440,13 @@ class Database:
                     pass  # 列已存在
 
         conn.commit()
+
+        # 独立创建索引（不依赖列存在性检查）
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_news_title_hash ON news(title_hash)")
+        except sqlite3.OperationalError:
+            pass  # 字段或表尚未就绪
+
         self._close(conn)
 
     # ═══════════════════════════════════════════
@@ -597,21 +610,71 @@ class Database:
         self._close(conn)
         return [dict(r) for r in rows]
 
+    @staticmethod
+    def _normalize_title(title: str) -> str:
+        """标题归一化：去空格、全角转半角、去标点，用于去重匹配"""
+        if not title:
+            return ""
+        import unicodedata
+        # 全角转半角
+        t = unicodedata.normalize('NFKC', title)
+        # 去空格 + 常见标点
+        import re
+        t = re.sub(r'[\s,，。！？、；：""''（）\(\)【】\[\]《》【】「」『』…—·～\t\n\r]', '', t)
+        return t[:100].lower()
+
     def insert_news(self, title: str, url: str, source: str,
                     summary: str = "", content: str = "",
                     published_at: str = None,
                     category: str = "其他",
                     keywords: str = "",
                     content_hash: str = "") -> Optional[int]:
+        """
+        插入新闻（带自动去重）
+
+        同一内容从不同来源采集时，
+        - 标题归一化后相同（48小时内）→ 合并到现有记录
+        - URL相同 → 跳过
+        - 标题不同 → 正常插入
+        """
         try:
             conn = self._connect()
+
+            title_hash = self._normalize_title(title)
+
+            # 1. 先检查是否已有相同标题哈希的新闻（48小时内）
+            if title_hash:
+                existing = conn.execute("""
+                    SELECT id, source, title FROM news
+                    WHERE title_hash = ?
+                    AND julianday('now') - julianday(collected_at) < 2
+                    ORDER BY id ASC LIMIT 1
+                """, (title_hash,)).fetchone()
+
+                if existing:
+                    existing_id = existing["id"]
+                    # 合并来源
+                    old_sources = (existing["source"] or "").split("/")
+                    if source not in old_sources:
+                        new_source = f"{existing['source']}/{source}"
+                        if len(title) > len(existing["title"] or ""):
+                            conn.execute("UPDATE news SET source=?, title=? WHERE id=?",
+                                         (new_source, title, existing_id))
+                        else:
+                            conn.execute("UPDATE news SET source=? WHERE id=?",
+                                         (new_source, existing_id))
+                        conn.commit()
+                    self._close(conn)
+                    return existing_id
+
+            # 2. 新记录：正常插入（URL UNIQUE防重）
             cur = conn.execute("""
                 INSERT OR IGNORE INTO news(
                     title, url, source, summary, content,
-                    published_at, category, keywords, content_hash
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    published_at, category, keywords, content_hash, title_hash
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (title, url, source, summary, content,
-                  published_at, category, keywords, content_hash))
+                  published_at, category, keywords, content_hash, title_hash))
             conn.commit()
             last_id = cur.lastrowid
             self._close(conn)
