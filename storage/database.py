@@ -388,6 +388,39 @@ class Database:
                 last_error TEXT,
                 consecutive_failures INTEGER DEFAULT 0
             );
+
+            -- 24. 信源权重配置表
+            CREATE TABLE IF NOT EXISTS source_config (
+                source_name TEXT PRIMARY KEY,
+                weight REAL DEFAULT 1.0,
+                is_official INTEGER DEFAULT 0,
+                is_blocked INTEGER DEFAULT 0,
+                category TEXT DEFAULT '财经媒体',
+                notes TEXT DEFAULT ''
+            );
+
+            -- 插入默认信源权重
+            INSERT OR IGNORE INTO source_config(source_name, weight, is_official, category) VALUES
+                ('巨潮资讯网', 1.0, 1, '官方公告'),
+                ('上交所公告', 1.0, 1, '官方公告'),
+                ('深交所公告', 1.0, 1, '官方公告'),
+                ('北交所公告', 1.0, 1, '官方公告'),
+                ('中国证券报', 0.9, 1, '四大证券报'),
+                ('证券时报', 0.9, 1, '四大证券报'),
+                ('上海证券报', 0.9, 1, '四大证券报'),
+                ('证券日报', 0.9, 1, '四大证券报'),
+                ('财联社', 0.85, 0, '财经媒体'),
+                ('华尔街见闻', 0.85, 0, '财经媒体'),
+                ('东方财富', 0.8, 0, '财经媒体'),
+                ('新浪财经', 0.8, 0, '财经媒体'),
+                ('同花顺', 0.75, 0, '财经媒体'),
+                ('雪球', 0.5, 0, '社交媒体'),
+                ('东方财富-个股', 0.5, 0, '个股页面'),
+                ('东方财富股吧', 0.3, 0, '社区论坛'),
+                ('问财', 0.6, 0, 'AI搜索'),
+                ('问财-分析采集', 0.6, 0, 'AI搜索'),
+                ('东方财富-个股(分析采集)', 0.5, 0, '分析采集'),
+                ('未知来源', 0.3, 0, '未知');
         """)
         conn.commit()
         self._close(conn)
@@ -424,6 +457,16 @@ class Database:
             # news 表 - 可信度字段（v7.0 新增）
             ("ALTER TABLE news ADD COLUMN credibility_tag TEXT DEFAULT ''",
              "SELECT credibility_tag FROM news LIMIT 1"),
+
+            # news 表 - 质量标签字段（v8.2 新增：旧闻/噪音标记）
+            ("ALTER TABLE news ADD COLUMN tags TEXT DEFAULT ''",
+             "SELECT tags FROM news LIMIT 1"),
+            ("ALTER TABLE news ADD COLUMN low_priority INTEGER DEFAULT 0",
+             "SELECT low_priority FROM news LIMIT 1"),
+            ("ALTER TABLE news ADD COLUMN offtopic INTEGER DEFAULT 0",
+             "SELECT offtopic FROM news LIMIT 1"),
+            ("ALTER TABLE news ADD COLUMN source_weight REAL DEFAULT 1.0",
+             "SELECT source_weight FROM news LIMIT 1"),
             ("ALTER TABLE news ADD COLUMN verified BOOLEAN DEFAULT 0",
              "SELECT verified FROM news LIMIT 1"),
             ("ALTER TABLE news ADD COLUMN evidence TEXT",

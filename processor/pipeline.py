@@ -6,7 +6,10 @@
 from typing import Dict, Any, List, Optional
 
 from .cleaner import clean_text
-from .deduplicator import SimHash, hamming_distance, dedup
+from .deduplicator import (
+    SimHash, hamming_distance, dedup,
+    filter_stale_news, filter_offtopic,
+)
 from .extractor import extract_keywords, detect_stock_codes, categorize_news, extract_entities
 
 
@@ -100,41 +103,47 @@ def process_article(raw_data: Dict[str, Any]) -> Dict[str, Any]:
         return result
 
 
-def process_batch(raw_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def process_batch(
+    raw_list: List[Dict[str, Any]],
+    known_stocks: Optional[List[Dict[str, str]]] = None,
+) -> List[Dict[str, Any]]:
     """
-    批量处理新闻列表
-    流程: 清洗 → 去重 → 特征提取
+    批量处理新闻列表（增强版）
+    流程: 清洗 → 旧闻过滤 → 去重 → 噪音过滤 → 特征提取
 
     Args:
         raw_list: 原始文章列表
+        known_stocks: [{code, name}, ...] 用于噪音过滤
 
     Returns:
-        处理后的文章列表（已去重）
+        处理后的文章列表（已去重+过滤）
     """
     if not raw_list:
         return []
 
     # 1. 清洗 + 提取（单遍扫描）
     processed = []
-    errors = 0
     for article in raw_list:
         try:
             result = process_article(article)
             processed.append(result)
         except Exception:
-            errors += 1
             processed.append(article)
 
-    # 2. 基于SimHash去重（使用clean_content）
+    # 2. 旧闻过滤（标记 low_priority）
+    processed = filter_stale_news(processed, max_age_hours=48)
+
+    # 3. 基于SimHash去重（使用clean_content）
     if processed:
-        deduped = dedup(
+        processed = dedup(
             processed,
             threshold=3,
             text_key="clean_content",
             title_key="clean_title",
             window_size=100,
         )
-    else:
-        deduped = []
 
-    return deduped
+    # 4. 噪音过滤（标记 offtopic）
+    processed = filter_offtopic(processed, known_stocks=known_stocks)
+
+    return processed

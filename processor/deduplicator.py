@@ -6,7 +6,8 @@ SimHash 文本去重模块
 """
 
 import math
-from typing import List, Dict, Any
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
 
 
 class SimHash:
@@ -228,3 +229,104 @@ def dedup_by_content_hash(
             result.append(article)
 
     return result
+
+
+def filter_stale_news(
+    news_list: List[Dict[str, Any]],
+    publish_key: str = "published_at",
+    max_age_hours: int = 48,
+) -> List[Dict[str, Any]]:
+    """
+    过滤过期新闻：超过 max_age_hours 的标记为旧闻
+
+    返回 (valid_news, stale_count, stale_ids)
+    旧闻不会被删除，而是标记 priority=-1 传递给下游
+
+    Args:
+        news_list: 新闻列表
+        publish_key: 发布时间字段名
+        max_age_hours: 最大时效小时数（默认48h）
+
+    Returns:
+        处理后的列表（旧闻标记 low_priority=True）
+    """
+    now = datetime.now()
+    deadline = now - timedelta(hours=max_age_hours)
+    stale_count = 0
+
+    for article in news_list:
+        pub_str = article.get(publish_key, "")
+        if not pub_str:
+            continue
+        try:
+            if len(pub_str) >= 10:
+                pub_time = datetime.fromisoformat(pub_str[:19])
+            else:
+                continue
+
+            if pub_time < deadline:
+                article["low_priority"] = True
+                article.setdefault("tags", [])
+                article["tags"].append("历史旧闻")
+                stale_count += 1
+        except (ValueError, TypeError):
+            continue
+
+    return news_list
+
+
+def filter_offtopic(
+    news_list: List[Dict[str, Any]],
+    known_stocks: Optional[List[Dict[str, str]]] = None,
+    title_key: str = "title",
+    content_key: str = "content",
+) -> List[Dict[str, Any]]:
+    """
+    过滤不包含任何A股标的的泛财经噪音
+
+    检查标题+正文中是否出现已知股票名称/代码。
+    如果没有匹配，打 offtopic=True 标签，不给LLM分析。
+
+    Args:
+        news_list: 新闻列表
+        known_stocks: [{code, name}, ...]，为空时跳过检查
+        title_key: 标题字段
+        content_key: 正文/摘要字段
+
+    Returns:
+        处理后的列表（无关内容标记 offtopic=True）
+    """
+    if not known_stocks:
+        return news_list
+
+    for article in news_list:
+        title = article.get(title_key, "") or ""
+        content = article.get(content_key, "") or ""
+        text = (title + " " + content)[:2000]
+
+        # 1. 检查是否有已知股票名称
+        matched = False
+        for s in known_stocks:
+            if s["name"] in text or s["code"] in text:
+                matched = True
+                break
+
+        # 2. 检查是否有泛A股股票代码模式（6位数字）
+        if not matched:
+            import re
+            if re.search(r'(?<!\d)(?:6\d{5}|0\d{5}|3\d{5}|8\d{5}|4\d{5})(?!\d)', text):
+                matched = True
+
+        # 3. 检查是否包含核心财经概念词
+        if not matched:
+            core_terms = ["A股", "大盘", "涨停", "跌停", "板块", "上证", "深证",
+                          "创业板", "科创板", "北向", "主力", "机构", "申万"]
+            if any(t in text for t in core_terms):
+                matched = True
+
+        if not matched:
+            article["offtopic"] = True
+            article.setdefault("tags", [])
+            article["tags"].append("泛财经噪音")
+
+    return news_list

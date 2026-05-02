@@ -182,6 +182,62 @@ class BaseCollector:
     def safe_text(self, resp: Optional[requests.Response]) -> str:
         return resp.text if resp else ""
 
+    def extract_article(self, html: str, url: str = "") -> Dict[str, str]:
+        """
+        三级降级：从HTML中提取新闻正文
+
+        1. XPath/CSS选择器精确提取
+        2. newspaper3k 智能提取（降级）
+        3. body纯文本截取（兜底）
+
+        Returns:
+            {"title": str, "content": str, "parse_quality": "high" / "mid" / "low"}
+        """
+        result = {"title": "", "content": "", "parse_quality": "low"}
+        if not html:
+            return result
+
+        # 一级：精确提取（由具体spider的解析逻辑覆盖）
+        # 二级：newspaper3k 智能提取
+        try:
+            from newspaper import Article
+            article = Article(url if url else "")
+            article.set_html(html)
+            article.parse()
+            title = (article.title or "").strip()
+            text = (article.text or "").strip()
+            if len(text) > 100:
+                result["title"] = title
+                result["content"] = text
+                result["parse_quality"] = "mid"
+                return result
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        # 三级：body纯文本截取
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "lxml")
+            body = soup.find("body") or soup
+            text = body.get_text(separator="\n", strip=True)
+            text = "\n".join(
+                line for line in text.split("\n")
+                if len(line) > 20
+            )
+            # 取title
+            title_tag = soup.find("title")
+            if title_tag:
+                result["title"] = title_tag.get_text(strip=True)
+            if len(text) > 50:
+                result["content"] = text[:5000]
+                result["parse_quality"] = "low"
+        except Exception:
+            pass
+
+        return result
+
     def collect(self) -> Union[int, Dict[str, int]]:
         """
         子类实现：执行一次采集，返回采集数量或各分类采集结果
