@@ -245,12 +245,17 @@ class NLPAnalyzer:
     # 核心分析方法
     # ──────────────────────────────────────────
 
-    def analyze_news(self, news_list: List[Dict]) -> Dict[str, Any]:
+    def analyze_news(self, news_list: List[Dict],
+                      stock_code: str = "", stock_name: str = "",
+                      historical_context: str = "") -> Dict[str, Any]:
         """
-        对一批新闻做摘要 + 情绪分析
+        对一批新闻做摘要 + 情绪分析（增强版，支持历史记忆注入）
 
         Args:
-            news_list: 新闻列表，每项包含 title, summary/content, source, published_at
+            news_list: 新闻列表
+            stock_code: 股票代码（用于加载历史记忆）
+            stock_name: 股票名称
+            historical_context: 历史分析记忆文本
 
         Returns:
             {
@@ -308,8 +313,17 @@ class NLPAnalyzer:
                 f"内容: {summary}\n"
             )
 
-        user_prompt = f"""请分析以下 {len(news_list)} 条财经新闻，输出严格 JSON 格式的分析结果。
+        # 构建历史上下文段
+        history_block = ""
+        if historical_context:
+            history_block = f"""
+【历史分析参考】
+{historical_context}
+注意：以上是历史分析记录，请对比当前新闻判断趋势变化。
+"""
 
+        user_prompt = f"""请分析以下 {len(news_list)} 条财经新闻，输出严格 JSON 格式的分析结果。
+{history_block}
 新闻列表：
 ---
 {chr(10).join(news_texts)}

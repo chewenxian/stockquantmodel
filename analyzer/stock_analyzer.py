@@ -428,6 +428,16 @@ class StockAnalyzer:
 
         logger.info(f"{code}: {len(news_items)} 条新闻, 行情: {'有' if market_data else '无'}")
 
+        # 加载历史分析记忆
+        try:
+            from analyzer.analysis_memory import AnalysisMemory
+            memory = AnalysisMemory()
+            historical_context = memory.get_historical_context(code)
+            if historical_context:
+                logger.info(f"{code}: 载入历史分析记忆")
+        except Exception:
+            historical_context = ""
+
         # 3. NER 实体提取
         ner_entities: Dict = {}
         news_context = ""
@@ -528,7 +538,12 @@ class StockAnalyzer:
 
             if self.nlp:
                 try:
-                    llm_result = self.nlp.analyze_news(news_items)
+                    llm_result = self.nlp.analyze_news(
+                        news_items,
+                        stock_code=code,
+                        stock_name=name,
+                        historical_context=historical_context
+                    )
                     summary = llm_result.get("summary", summary)
                     key_topics = llm_result.get("key_topics", [])
                     risk_warnings = llm_result.get("risk_warnings", [])
@@ -635,6 +650,14 @@ class StockAnalyzer:
 
         # 10. 写入数据库
         self._save_analysis(result)
+
+        # 11. 保存到分析记忆（借鉴 TradingAgents）
+        try:
+            from analyzer.analysis_memory import AnalysisMemory
+            memory = AnalysisMemory()
+            memory.save_analysis(code, name, result)
+        except Exception:
+            pass
 
         logger.info(f"{code}: 增强分析完成: "
                     f"情绪={avg_sentiment:.2f}, "
