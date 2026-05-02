@@ -13,6 +13,7 @@
 import logging
 import re
 import time
+import threading
 import requests
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -332,7 +333,7 @@ class MultiAgentOrchestrator:
     #  全流程分析（含按需采集）
     # ═══════════════════════════════════════════════════════
 
-    def analyze(self, code: str, name: str) -> Dict:
+    def analyze(self, code: str, name: str, timeout_seconds: int = 180) -> Dict:
         """
         执行全流程多 Agent 分析
         自动按需实时采集缺失数据
@@ -340,6 +341,7 @@ class MultiAgentOrchestrator:
         Args:
             code: 股票代码
             name: 股票名称
+            timeout_seconds: 超时秒数（默认180s，防止僵尸任务）
 
         Returns:
             {
@@ -352,8 +354,34 @@ class MultiAgentOrchestrator:
         """
         logger.info(f"🚀 启动多Agent分析: {name}({code})")
 
-        # ── Step 0: 按需实时采集 ──
-        logger.info(f"Phase 0: 按需实时采集...")
+        # 超时控制：核心分析流程最多运行 timeout_seconds 秒
+        _result_holder = []
+        _exception_holder = []
+
+        def _run_analysis():
+            _result_holder.append(self._do_analyze(code, name))
+
+        worker = threading.Thread(target=_run_analysis, daemon=True)
+        worker.start()
+        worker.join(timeout=timeout_seconds)
+
+        if worker.is_alive():
+            logger.error(f"⏱️ 分析超时 ({timeout_seconds}s)，{name}({code}) 跳过")
+            return {
+                "rating": "谨慎持有",
+                "sentiment": 0.0,
+                "confidence": 0.1,
+                "summary": f"分析超时 ({timeout_seconds}s)，信息不足建议观望",
+                "risk_factors": ["分析超时，数据可能不完整"],
+                "opportunities": [],
+                "analysis_date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            }
+
+        return _result_holder[0]
+
+    def _do_analyze(self, code: str, name: str) -> Dict:
+        """实际分析逻辑（被 analyze 的线程包裹）"""
+        logger.info(f"  ── Step 0: 按需实时采集 ──")
 
         self._ensure_stock_in_db(code, name)
 

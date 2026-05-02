@@ -8,6 +8,7 @@ DeepSeek API 集成模块
 """
 import os
 import json
+import re
 import time
 import logging
 from typing import Dict, List, Optional, Any
@@ -140,16 +141,17 @@ class NLPAnalyzer:
                     return None
 
                 elif resp.status_code == 429:
-                    # 限流，等待后重试
-                    retry_after = int(resp.headers.get("Retry-After", self.retry_delay))
+                    # 限流，指数退避等待
+                    retry_after = int(resp.headers.get("Retry-After", 2 ** attempt))
                     logger.warning(f"API 限流，等待 {retry_after}s 后重试")
                     time.sleep(retry_after)
                     continue
 
                 elif resp.status_code >= 500:
-                    logger.warning(f"API 服务端错误 ({resp.status_code})，等待重试...")
+                    backoff = 2 ** attempt  # 指数退避: 2s, 4s, 8s
+                    logger.warning(f"API 服务端错误 ({resp.status_code})，{backoff}s后重试...")
                     if attempt < self.retry_times:
-                        time.sleep(self.retry_delay * attempt)
+                        time.sleep(backoff)
                     continue
 
                 else:
@@ -158,15 +160,17 @@ class NLPAnalyzer:
 
             except requests.Timeout:
                 last_error = "API 请求超时"
-                logger.warning(f"第 {attempt} 次调用超时 ({self.timeout}s)")
+                backoff = 2 ** attempt
+                logger.warning(f"第 {attempt} 次调用超时 ({self.timeout}s)，{backoff}s后重试")
                 if attempt < self.retry_times:
-                    time.sleep(self.retry_delay * attempt)
+                    time.sleep(backoff)
 
             except requests.ConnectionError as e:
                 last_error = f"网络连接错误: {e}"
-                logger.warning(f"第 {attempt} 次调用连接失败")
+                backoff = 2 ** attempt
+                logger.warning(f"第 {attempt} 次调用连接失败，{backoff}s后重试")
                 if attempt < self.retry_times:
-                    time.sleep(self.retry_delay * attempt)
+                    time.sleep(backoff)
 
             except Exception as e:
                 last_error = str(e)
@@ -412,29 +416,10 @@ class NLPAnalyzer:
             logger.warning("LLM 分析失败，使用规则兜底")
             return self._rule_based_fallback(news_list)
 
-        # 提取 JSON
-        try:
-            # 尝试直接解析
-            result = json.loads(content)
-        except json.JSONDecodeError:
-            # 尝试从 markdown 代码块中提取
-            import re
-            json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', content, re.DOTALL)
-            if json_match:
-                try:
-                    result = json.loads(json_match.group(1))
-                except json.JSONDecodeError:
-                    result = self._rule_based_fallback(news_list)
-            else:
-                # 尝试找花括号包裹的内容
-                brace_match = re.search(r'\{.*\}', content, re.DOTALL)
-                if brace_match:
-                    try:
-                        result = json.loads(brace_match.group(0))
-                    except json.JSONDecodeError:
-                        result = self._rule_based_fallback(news_list)
-                else:
-                    result = self._rule_based_fallback(news_list)
+        # 提取 JSON（带智能修复：代码块→花括号→片段截取）
+        result = safe_parse_json(content)
+        if result is None:
+            result = self._rule_based_fallback(news_list)
 
         # 确保关键字段存在（含增强版字段）
         result.setdefault("summary", "AI分析完成")
@@ -657,6 +642,61 @@ class NLPAnalyzer:
 
 
 # 测试用
+# ═══════════════════════════════════════════
+# 工具函数
+# ═══════════════════════════════════════════
+
+def safe_parse_json(text: str) -> Optional[Dict[str, Any]]:
+    """
+    智能JSON解析，处理LLM输出的各种格式问题
+
+    支持格式:
+    1. 纯JSON: {"key": "value"}
+    2. Markdown代码块: ```json\n{"key": "value"}\n```
+    3. 带杂音的JSON: 某些文字{"key": "value"}某些文字
+    4. 截断的JSON: {"key": "value", ... (尝试补全)
+
+    Returns:
+        解析成功的字典，失败返回None
+    """
+    if not text:
+        return None
+
+    # 1. 尝试直接解析
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. 尝试从markdown代码块中提取
+    match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 3. 尝试找第一组花括号对
+    brace_match = re.search(r'\{[^{}]*"[\s\S]*\}', text, re.DOTALL)
+    if brace_match:
+        try:
+            return json.loads(brace_match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    # 4. 截断修复：找到第一个{和最后一个}，截取中间内容
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     analyzer = NLPAnalyzer()
