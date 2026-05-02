@@ -238,13 +238,19 @@ class RealtimePusher:
             news_map = {}
             for row in rows:
                 r = dict(row)
-                nid = r["id"]
+                nid = r.get("id")
+                if not nid:
+                    continue
+                # 跳过分析触发采集的新闻（非定时采集）
+                source = r.get("source", "") or ""
+                if "分析采集" in source:
+                    continue
                 if nid not in news_map:
                     news_map[nid] = {
                         "id": nid,
                         "title": r["title"],
                         "summary": r.get("summary", ""),
-                        "source": r.get("source", ""),
+                        "source": source,
                         "published_at": r["published_at"],
                         "stock_codes": set(),
                     }

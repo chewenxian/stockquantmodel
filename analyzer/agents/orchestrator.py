@@ -153,6 +153,9 @@ class MultiAgentOrchestrator:
             try:
                 count = collector.collect_news_for_stock(code)
                 logger.info(f"[按需采集] 东方财富个股新闻({code}): {count}条")
+                if count > 0:
+                    # 标记为分析采集，避免触发实时推送
+                    self._tag_analysis_news(code)
                 fetched += count
                 time.sleep(0.3)
             except Exception as e:
@@ -180,7 +183,7 @@ class MultiAgentOrchestrator:
                         batch.append({
                             "title": item.get("title", ""),
                             "url": item.get("url", "") or item.get("source_url", ""),
-                            "source": "问财",
+                            "source": "问财-分析采集",  # 标记来源，避免推送
                             "summary": item.get("summary", "") or item.get("content", ""),
                             "published_at": item.get("publish_date", "") or datetime.now().isoformat(),
                         })
@@ -206,6 +209,34 @@ class MultiAgentOrchestrator:
                 logger.debug(f"[按需采集] 问财新闻补充失败: {e}")
 
         return fetched
+
+    def _tag_analysis_news(self, code: str):
+        """
+        将分析触发的新闻标记为'分析采集'，
+        避免 RealtimePusher 守护进程误推送到飞书/QQ。
+        """
+        if not self.db:
+            return
+        try:
+            conn = self.db._connect()
+            # 找到最新插入且来源为'东方财富-个股'的未标记新闻
+            # 关联到该股票且还未标记的
+            conn.execute("""
+                UPDATE news SET source = source || '(分析采集)'
+                WHERE id IN (
+                    SELECT ns.news_id FROM news_stocks ns
+                    WHERE ns.stock_code = ?
+                )
+                AND source LIKE '东方财富-个股'
+                AND source NOT LIKE '%分析采集%'
+            """, (code,))
+            affected = conn.total_changes
+            conn.commit()
+            self.db._close(conn)
+            if affected > 0:
+                logger.debug(f"[按需采集] 标记{affected}条新闻为分析采集，已跳过推送")
+        except Exception as e:
+            logger.debug(f"[按需采集] 标记分析新闻异常: {e}")
 
     def _live_fetch_kline(self, code: str) -> int:
         """按需实时采集历史K线（多源降级，直接调用）"""
