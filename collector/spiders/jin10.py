@@ -122,10 +122,14 @@ class Jin10Collector(BaseCollector):
 
                 if news_id:
                     # 检测涉及板块并关联股票
-                    sectors = self._detect_related_sectors(content + title)
-                    for sector_name, stock_codes in sectors.items():
-                        for code in stock_codes:
-                            self.db.link_news_stock(news_id, code)
+                    # 先用标题精确匹配关联自选股
+                    linked = self._link_by_stock_name(news_id, title)
+                    if not linked:
+                        # 标题没匹配到，再用内容检测（但已废弃，返回空）
+                        sectors = self._detect_related_sectors(content + title)
+                        for sector_name, stock_codes in sectors.items():
+                            for code in stock_codes:
+                                self.db.link_news_stock(news_id, code)
 
                     count += 1
 
@@ -163,40 +167,52 @@ class Jin10Collector(BaseCollector):
         return count
 
     def _detect_related_sectors(self, text: str) -> Dict[str, List[str]]:
-        """从文本中检测涉及的板块并关联自选股"""
+        """从文本中检测涉及的板块并关联自选股
+        注意: 仅匹配明确含义的关键词，避免"金融时报"误配"金融"
+        """
         sectors = {}
 
-        # 关键词-股票映射
-        keyword_map = {
-            "新能源": ["300750", "002594", "601012"],
-            "新能源汽车": ["002594", "600104"],
-            "光伏": ["601012", "688599"],
-            "锂电池": ["300750", "002074"],
-            "白酒": ["600519", "000858", "000568"],
-            "金融|银行|券商": ["601318", "600036", "600030"],
-            "保险": ["601318", "601601"],
-            "房地产|楼市": ["000002", "001979"],
-            "医药|医疗|CRO": ["603259", "300760", "600196"],
-            "AI|人工智能|算力": ["002230", "688111", "603019"],
-            "半导体|芯片": ["688981", "002371", "603501"],
-            "家电": ["000333", "000651"],
-            "消费": ["600519", "000858", "600887", "000333"],
-            "安防|AI视觉": ["002415"],
-            "面板|屏幕": ["000725", "002456"],
-            "军工|国防": ["600760", "600893", "600185"],
-            "煤炭": ["601088", "600188"],
-            "有色|铝|铜": ["601600", "000630", "000060"],
-            "原油|石油|能源": ["601857", "600028", "600688"],
-            "黄金": ["601899", "600547", "002155"],
-            "农业|猪肉|粮食": ["000895", "002714", "600598"],
-        }
-
-        text_lower = text.lower()
-        for keywords, codes in keyword_map.items():
-            if re.search(keywords, text, re.IGNORECASE):
-                sectors[keywords] = codes
-
+        # 关键词-硬编码股票映射（已废弃）
+        # 使用新版基于自选股+标题精确匹配
         return sectors
+
+    def _link_by_stock_name(self, news_id: int, title: str) -> bool:
+        """
+        通过股票名称精确匹配标题来关联自选股
+        股票名必须在标题中作为独立词组出现
+        返回是否成功关联
+        """
+        import sqlite3
+        try:
+            conn = self.db._connect()
+            stocks = conn.execute("SELECT code, name FROM stocks").fetchall()
+            stocks = sorted(stocks, key=lambda x: -len(x[1]))
+
+            for code, name in stocks:
+                if not name or name not in title:
+                    continue
+                # 检查边界：确认name不是更长词组的一部分
+                idx = title.index(name)
+                before = title[idx-1] if idx > 0 else ""
+                after = title[idx+len(name)] if idx+len(name) < len(title) else ""
+
+                if before and self._is_cjk_or_alpha(before):
+                    continue  # 前面有中文/字母，可能是更大词的一部分
+                if after and self._is_cjk_or_alpha(after):
+                    continue  # 后面有中文/字母，可能是更大词的一部分
+
+                self.db.link_news_stock(news_id, code)
+                return True
+
+            self.db._close(conn)
+        except Exception:
+            pass
+        return False
+
+    def _is_cjk_or_alpha(self, ch: str) -> bool:
+        """判断字符是否为中文或英文字母"""
+        cp = ord(ch)
+        return (0x4E00 <= cp <= 0x9FFF) or ('a' <= ch <= 'z') or ('A' <= ch <= 'Z')
 
 
 # 如果直接运行，测试采集
