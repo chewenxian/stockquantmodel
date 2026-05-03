@@ -48,10 +48,26 @@ class MarginTradingCollector(BaseCollector):
         conn.commit()
         conn.close()
 
+    def _probe_api(self) -> bool:
+        """快速探测 push2 API 是否可达"""
+        try:
+            import requests as _req
+            r = _req.get("https://push2.eastmoney.com/api/qt/clist/get",
+                         params={"pn": "1", "pz": "1", "fs": "m:0+t:6"},
+                         timeout=3, headers={"User-Agent": self._random_ua()})
+            return r.status_code == 200
+        except Exception:
+            return False
+
     def collect(self) -> Dict[str, int]:
         """采集融资融券数据"""
         self._ensure_table()
         results = {"margin_trading": 0}
+
+        # 快速探测，不可达直接跳过
+        if not self._probe_api():
+            logger.warning("[融资融券] push2 不可达，跳过（非关键数据）")
+            return results
 
         params = {
             "pn": 1,

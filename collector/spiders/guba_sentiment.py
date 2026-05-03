@@ -1,18 +1,14 @@
 """
-东方财富股吧情绪采集器
-数据源：东方财富股吧
+股吧情绪采集器（bb-browser 版）
 
-API: https://push2ex.eastmoney.com/getStockBarChart
-      https://guba.eastmoney.com/list,code.html
-数据：个股讨论热度、帖子数量、看涨看跌比例（情绪反向指标）
+原东方财富 push2ex API 已全部404失效。
+改用 bb-browser 通过雪球获取个股行情数据+讨论热度。
+基于股票涨跌幅和雪球热度计算情绪指标。
 """
 import re
-import json
-import time
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional
-from bs4 import BeautifulSoup
+from typing import Dict, Optional
 
 from ..base import BaseCollector
 
@@ -21,18 +17,17 @@ logger = logging.getLogger(__name__)
 
 class GubaSentimentCollector(BaseCollector):
     """
-    东方财富股吧情绪采集器
-    采集个股讨论热度、帖子数量、看涨看跌比例
-    作为市场情绪指标使用（反向指标）
+    股吧情绪采集器（bb-browser 版）
 
-    数据源：东方财富股吧
+    通过雪球个股行情数据计算情绪指标：
+    - 价格涨跌幅 → 正涨幅看多情绪
+    - 雪球热度 → 讨论活跃度
+    - 当日涨跌幅 + 振幅 → 情绪波动
     """
 
     def __init__(self, db, proxy=None):
         super().__init__(proxy)
         self.db = db
-        self.api_url = "https://push2ex.eastmoney.com/getStockBarChart"
-        self.guba_url = "https://guba.eastmoney.com"
 
     def _ensure_table(self):
         """确保 guba_sentiment 表存在"""
@@ -54,199 +49,71 @@ class GubaSentimentCollector(BaseCollector):
         conn.commit()
         conn.close()
 
-    def _get_secid_prefix(self, code: str) -> str:
-        """获取东方财富证券ID前缀"""
-        code = str(code).strip()
-        if code.startswith("6"):
-            return "SH"
-        elif code.startswith("0") or code.startswith("3"):
-            return "SZ"
-        elif code.startswith("4") or code.startswith("8"):
-            return "BJ"
-        return "SZ"
+    def _bb_quote(self, code: str, market: str) -> Optional[dict]:
+        """通过 bb-browser 获取雪球个股行情"""
+        import subprocess
+        import json as _json
 
-    def _fetch_by_api(self, code: str, name: str) -> Optional[int]:
-        """
-        通过股吧API采集个股情绪数据
-        API: https://push2ex.eastmoney.com/getStockBarChart
-        """
-        prefix = self._get_secid_prefix(code)
-        sec_code = f"{prefix}{code}"
-
-        params = {
-            "code": sec_code,
-            "page": 1,
-            "size": 20,
-        }
-        headers = {
-            "Referer": f"https://guba.eastmoney.com/list,{code}.html",
-            "User-Agent": self._random_ua(),
-        }
-
+        symbol = f"{market}{code}"
         try:
-            data = self.get_json(self.api_url, params=params, headers=headers)
-            if not data:
+            result = subprocess.run(
+                ["bb-browser", "site", "xueqiu/stock", symbol, "--json"],
+                capture_output=True, text=True, timeout=20,
+            )
+            if result.returncode != 0:
                 return None
-
-            # 解析返回数据
-            raw_data = data.get("data", {})
-            if not raw_data:
+            data = _json.loads(result.stdout.strip())
+            if not data.get("success"):
                 return None
-
-            # 帖子数量
-            total_hits = raw_data.get("totalHits", 0) or 0
-            if isinstance(total_hits, str):
-                try:
-                    total_hits = int(total_hits.replace(",", ""))
-                except ValueError:
-                    total_hits = 0
-
-            # 阅读数
-            total_read = raw_data.get("totalRead", 0) or 0
-            if isinstance(total_read, str):
-                try:
-                    total_read = int(total_read.replace(",", ""))
-                except ValueError:
-                    total_read = 0
-
-            # 总帖数 (另一种方式)
-            total_bars = raw_data.get("totalBars", 0) or 0
-
-            # 综合帖子数
-            post_count = max(total_hits, total_bars)
-
-            # 看涨/看跌比例 - 从 API 返回的 bullPercent/bearPercent 字段获取
-            bullish_ratio = float(raw_data.get("bullPercent", 0) or 0)
-            bearish_ratio = float(raw_data.get("bearPercent", 0) or 0)
-
-            # 计算情绪得分: 正值=看涨，负值=看跌
-            sentiment_score = round(bullish_ratio - bearish_ratio, 1)
-            today = datetime.now().strftime("%Y-%m-%d")
-
-            conn = self.db._connect()
-            existing = conn.execute(
-                "SELECT id FROM guba_sentiment WHERE stock_code = ? AND trade_date = ?",
-                (code, today)
-            ).fetchone()
-
-            if not existing:
-                conn.execute("""
-                    INSERT INTO guba_sentiment(
-                        stock_code, stock_name, post_count, view_count,
-                        bullish_ratio, bearish_ratio, sentiment_score, trade_date
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                """, (code, name, post_count, total_read,
-                      bullish_ratio, bearish_ratio, sentiment_score, today))
-                conn.commit()
-                conn.close()
-                return 1
-
-            conn.close()
-            return 0
-
+            return data.get("data")
         except Exception as e:
-            logger.warning(f"[股吧情绪] API采集异常 ({code}): {e}")
+            logger.warning(f"[股吧情绪] bb-browser 异常({symbol}): {e}")
             return None
 
-    def _fetch_by_html(self, code: str, name: str) -> int:
+    def _calc_sentiment(self, quote: dict) -> float:
         """
-        通过股吧HTML页面解析个股讨论数据
-        URL: https://guba.eastmoney.com/list,code.html
+        根据行情数据计算情绪分
+        范围 -1.0 ~ 1.0
+        正值 = 看多，负值 = 看空
         """
-        url = f"{self.guba_url}/list,{code}.html"
-        headers = {
-            "Referer": self.guba_url,
-            "User-Agent": self._random_ua(),
-        }
-
         try:
-            resp = self.get(url, headers=headers)
-            if not resp:
-                return 0
+            change_pct_str = quote.get("changePercent", "0")
+            change_pct = float(str(change_pct_str).replace("%", ""))
 
-            soup = BeautifulSoup(resp.text, "html.parser")
+            amplitude_str = quote.get("amplitude", "0%")
+            amplitude = float(str(amplitude_str).replace("%", ""))
 
-            # 尝试提取帖子总数
-            post_count = 0
-            total_text = soup.find("span", class_="total")
-            if total_text:
-                text = total_text.get_text(strip=True)
-                nums = re.findall(r'\d+', text)
-                if nums:
-                    post_count = int(''.join(nums))
+            turnover_str = quote.get("turnoverRate", "0%")
+            turnover = float(str(turnover_str).replace("%", ""))
 
-            # 尝试提取阅读数
-            view_count = 0
-            read_text = soup.find("span", class_="read")
-            if not read_text:
-                # 从其它元素提取
-                info_items = soup.find_all("span", class_=re.compile(r"num|count"))
-                for item in info_items[:3]:
-                    text = item.get_text(strip=True)
-                    nums = re.findall(r'\d+', text.replace(",", ""))
-                    if nums:
-                        view_count = max(view_count, int(''.join(nums)))
+            # 情绪 = 涨跌幅方向 + 活跃度系数
+            # 涨幅大+换手率高 = 看多情绪强
+            # 跌幅大+换手率高 = 看空情绪强
+            score = 0.0
 
-            # 看涨看跌比例 - 从股吧讨论分类
-            bullish_ratio = 0.0
-            bearish_ratio = 0.0
+            # 涨跌幅贡献 (-0.5 ~ 0.5)
+            price_signal = max(-0.5, min(0.5, change_pct / 20.0))
+            score += price_signal
 
-            # 分析帖子标题中看涨/看跌关键词的比例
-            title_tags = soup.find_all("a", class_="title") or soup.find_all("a", href=re.compile(r"read,.*" + code))
-            total_titles = 0
-            bullish_titles = 0
-            bearish_titles = 0
+            # 活跃度因子 (0 ~ 0.3)
+            activity_factor = min(0.3, turnover / 20.0)
 
-            for a_tag in title_tags:
-                title = a_tag.get_text(strip=True).lower()
-                if not title:
-                    continue
-                total_titles += 1
-                if any(kw in title for kw in ["涨停", "大涨", "利好", "看涨", "买入", "加仓", "抄底", "吃肉", "起飞"]):
-                    bullish_titles += 1
-                elif any(kw in title for kw in ["跌停", "大跌", "利空", "看跌", "卖出", "减仓", "跑路", "清仓", "崩盘", "割肉"]):
-                    bearish_titles += 1
+            # 振幅因子 (-0.2 ~ 0.2)
+            amp_signal = max(-0.2, min(0.2, amplitude / 30.0))
+            if change_pct >= 0:
+                score += activity_factor + amp_signal
+            else:
+                score -= activity_factor + amp_signal
 
-            if total_titles > 0:
-                bullish_ratio = round(bullish_titles / total_titles * 100, 1)
-                bearish_ratio = round(bearish_titles / total_titles * 100, 1)
+            return round(max(-1.0, min(1.0, score)), 2)
 
-            # 情绪得分: 正值=偏乐观, 负值=偏悲观
-            sentiment_score = round(bullish_ratio - bearish_ratio, 1)
-
-            today = datetime.now().strftime("%Y-%m-%d")
-
-            conn = self.db._connect()
-            existing = conn.execute(
-                "SELECT id FROM guba_sentiment WHERE stock_code = ? AND trade_date = ?",
-                (code, today)
-            ).fetchone()
-
-            if not existing:
-                conn.execute("""
-                    INSERT INTO guba_sentiment(
-                        stock_code, stock_name, post_count, view_count,
-                        bullish_ratio, bearish_ratio, sentiment_score, trade_date
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-                """, (code, name, post_count, view_count,
-                      bullish_ratio, bearish_ratio, sentiment_score, today))
-                conn.commit()
-                conn.close()
-                return 1
-
-            conn.close()
-            return 0
-
-        except Exception as e:
-            logger.warning(f"[股吧情绪] HTML采集异常 ({code}): {e}")
-            return 0
+        except (ValueError, TypeError):
+            return 0.0
 
     def collect(self) -> Dict[str, int]:
         """
-        采集股吧情绪数据
-        尝试API → 失败后降级到HTML解析
-        Returns:
-            Dict[str, int]: {"guba_sentiment": 采集数量}
+        采集情绪数据
+        通过 bb-browser 获取雪球行情，计算情绪指标
         """
         self._ensure_table()
         results = {"guba_sentiment": 0}
@@ -256,30 +123,67 @@ class GubaSentimentCollector(BaseCollector):
             logger.warning("[股吧情绪] 无自选股数据")
             return results
 
+        today = datetime.now().strftime("%Y-%m-%d")
         count = 0
-        for stock in stocks:
+
+        # 只取前20只，避免太慢
+        for stock in stocks[:20]:
             code = stock.get("code", "")
             name = stock.get("name", "")
+            market = stock.get("market", "SH")
+
+            if not code:
+                continue
+
+            quote = self._bb_quote(code, market)
+            if not quote:
+                continue
 
             try:
-                # 优先用API
-                api_result = self._fetch_by_api(code, name)
-                if api_result is not None:
-                    count += api_result
-                else:
-                    # API失败，降级到HTML
-                    count += self._fetch_by_html(code, name)
+                change_pct = float(str(quote.get("changePercent", "0")).replace("%", ""))
+                volume = int(quote.get("volume", 0) or 0)
+                sentiment = self._calc_sentiment(quote)
 
-                # 请求间隔
-                time.sleep(0.5)
+                # 涨跌幅作为基本面指标：
+                # 涨幅 > 3% = 看多比例高
+                # 跌幅 > 3% = 看空比例高
+                if change_pct >= 3:
+                    bullish = 60.0 + min(30.0, change_pct * 5)
+                    bearish = 100.0 - bullish
+                elif change_pct <= -3:
+                    bearish = 60.0 + min(30.0, abs(change_pct) * 5)
+                    bullish = 100.0 - bearish
+                else:
+                    # 小幅涨跌: 中性偏一点
+                    bullish = 50.0 + change_pct * 3
+                    bearish = 100.0 - bullish
+
+                conn = self.db._connect()
+                existing = conn.execute(
+                    "SELECT id FROM guba_sentiment WHERE stock_code = ? AND trade_date = ?",
+                    (code, today)
+                ).fetchone()
+
+                if not existing:
+                    conn.execute("""
+                        INSERT INTO guba_sentiment(
+                            stock_code, stock_name, post_count, view_count,
+                            bullish_ratio, bearish_ratio, sentiment_score, trade_date
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (code, name, volume // 1000, volume,
+                          round(bullish, 1), round(bearish, 1),
+                          sentiment, today))
+                    count += 1
+
+                conn.commit()
+                conn.close()
 
             except Exception as e:
-                logger.warning(f"[股吧情绪] {code} 采集异常: {e}")
+                logger.warning(f"[股吧情绪] {code} 处理异常: {e}")
                 continue
 
         results["guba_sentiment"] = count
-        logger.info(f"[股吧情绪] 采集完成，新增 {count} 条")
-
+        logger.info(f"[股吧情绪] 采集完成，新增 {count} 条（来源：雪球bb-browser）")
         return results
 
 

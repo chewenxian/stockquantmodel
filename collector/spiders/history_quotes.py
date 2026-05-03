@@ -24,8 +24,26 @@ class HistoryQuotesCollector(BaseCollector):
     def _prefix(self, code: str) -> str:
         return "sh" if code.startswith("6") else "sz"
 
+    def _probe_sina(self) -> bool:
+        """快速探测新浪行情API是否可达"""
+        try:
+            import requests as _req
+            r = _req.get(
+                "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData",
+                params={"symbol": "sh600519", "scale": "60", "ma": "no", "datalen": "1"},
+                timeout=3,
+                headers={"User-Agent": self._random_ua()},
+            )
+            return r.status_code == 200 and len(r.text) > 10
+        except Exception:
+            return False
+
     def collect(self) -> Dict[str, int]:
         """采集所有自选股历史K线"""
+        if not self._probe_sina():
+            logger.warning("[历史K线] 新浪API不可达，跳过历史K线采集")
+            return {"kline_count": 0}
+
         stocks = self.db.load_stocks()
         result = self.collect_all_stocks(stocks, limit=500)
         return {"kline_count": result.get("kline_count", 0)}

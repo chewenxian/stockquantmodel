@@ -55,23 +55,31 @@ class EastMoneyCollector(BaseCollector):
         except Exception as e:
             logger.error(f"[东方财富] 行情采集异常: {e}")
             results["quotes"] = 0
+            # 行情失败时用 bb-browser 雪球行情补充
+            try:
+                bb_quotes = self._bb_fallback_quotes(stocks)
+                if bb_quotes > 0:
+                    results["bb_fallback_quotes"] = bb_quotes
+                    logger.info(f"[东方财富] bb-browser 补充行情: {bb_quotes} 条")
+            except Exception:
+                pass
 
         try:
             results["money_flow"] = self._collect_money_flow(stocks)
         except Exception as e:
-            logger.error(f"[东方财富] 资金流向采集异常: {e}")
+            logger.warning(f"[东方财富] 资金流向采集异常（非关键，跳过）: {e}")
             results["money_flow"] = 0
 
         try:
             results["dragon_tiger"] = self._collect_dragon_tiger()
         except Exception as e:
-            logger.error(f"[东方财富] 龙虎榜采集异常: {e}")
+            logger.warning(f"[东方财富] 龙虎榜采集异常（非关键，跳过）: {e}")
             results["dragon_tiger"] = 0
 
         try:
             results["boards"] = self._collect_boards()
         except Exception as e:
-            logger.error(f"[东方财富] 板块排行采集异常: {e}")
+            logger.warning(f"[东方财富] 板块排行采集异常（非关键，跳过）: {e}")
             results["boards"] = 0
 
         # 按个股采集新闻并关联自选股
@@ -188,6 +196,11 @@ class EastMoneyCollector(BaseCollector):
 
     def _collect_quotes(self, stocks: List[Dict]) -> int:
         """采集实时行情 - 使用 ulist.np/get 批量接口，批量插入"""
+        # 快速探测 push2
+        if not self._probe_push2():
+            logger.warning("[东方财富] push2不可达，东方财富行情跳过（由bb-browser补充）")
+            return 0
+
         secids = []
         for s in stocks:
             prefix = "1." if s["market"] == "SH" else "0."
@@ -238,8 +251,24 @@ class EastMoneyCollector(BaseCollector):
         logger.info(f"[东方财富] 批量插入行情 {count}/{len(batch_snapshots)} 条")
         return count
 
+    def _probe_push2(self) -> bool:
+        """快速探测 push2 是否可达"""
+        try:
+            import requests as _req
+            r = _req.get("https://push2.eastmoney.com/api/qt/clist/get",
+                         params={"pn": "1", "pz": "1", "fs": "m:0+t:6"},
+                         timeout=3, headers={"User-Agent": self._random_ua()})
+            return r.status_code == 200
+        except Exception:
+            return False
+
     def _collect_money_flow(self, stocks: List[Dict]) -> int:
         """采集资金流向排行（全市场，按主力净流入排序，批量插入）"""
+        # 快速探测
+        if not self._probe_push2():
+            logger.warning("[东方财富] push2 不可达，跳过资金流向")
+            return 0
+
         today = datetime.now().strftime("%Y-%m-%d")
         headers = {
             "Referer": "https://data.eastmoney.com/",
@@ -364,6 +393,11 @@ class EastMoneyCollector(BaseCollector):
 
     def _collect_boards(self) -> int:
         """采集板块涨跌排行（行业板块、概念板块，批量插入）"""
+        # 快速探测
+        if not self._probe_push2():
+            logger.warning("[东方财富] push2 不可达，跳过板块排行")
+            return 0
+
         headers = {
             "Referer": "https://data.eastmoney.com/bkzj/hy.html",
             "User-Agent": self._random_ua(),
@@ -404,6 +438,60 @@ class EastMoneyCollector(BaseCollector):
             return 0
         count = self.db.batch_insert_boards(all_batch)
         logger.info(f"[东方财富] 批量插入板块排行 {count}/{len(all_batch)} 条")
+        return count
+
+    def _bb_fallback_quotes(self, stocks: list) -> int:
+        """通过 bb-browser 雪球行情补充行情数据"""
+        import subprocess
+        import json as _json
+
+        count = 0
+        batch = []
+
+        for s in stocks[:50]:  # 最多50只
+            code = s["code"]
+            market = s["market"]
+            symbol = f"{market}{code}"
+
+            try:
+                result = subprocess.run(
+                    ["bb-browser", "site", "xueqiu/stock", symbol, "--json"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if result.returncode != 0:
+                    continue
+
+                data = _json.loads(result.stdout.strip())
+                if not data.get("success"):
+                    continue
+
+                q = data.get("data", {})
+                if not q:
+                    continue
+
+                batch.append({
+                    "stock_code": code,
+                    "price": q.get("price", 0) or 0,
+                    "change_pct": float(str(q.get("changePercent", "0")).replace("%", "")),
+                    "volume": q.get("volume", 0) or 0,
+                    "amount": 0,
+                    "high": q.get("high", 0) or 0,
+                    "low": q.get("low", 0) or 0,
+                    "open": q.get("open", 0) or 0,
+                    "turnover_rate": float(str(q.get("turnoverRate", "0%")).replace("%", "")),
+                })
+                count += 1
+
+                if len(batch) >= 10:
+                    self.db.batch_insert_market_snapshots(batch)
+                    batch = []
+
+            except Exception:
+                continue
+
+        if batch:
+            self.db.batch_insert_market_snapshots(batch)
+
         return count
 
     def collect_news_for_stock(self, code: str) -> int:

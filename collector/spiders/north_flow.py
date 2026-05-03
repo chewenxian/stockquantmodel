@@ -58,10 +58,26 @@ class NorthFlowCollector(BaseCollector):
         except (ValueError, TypeError):
             return 0.0
 
+    def _probe_api(self) -> bool:
+        """快速探测 push2 API 是否可达，不可达则跳过避免3次重试"""
+        try:
+            import requests as _req
+            r = _req.get("https://push2.eastmoney.com/api/qt/kamt.kline/get",
+                         params={"klt": "101", "lmt": "1", "secid": "1"},
+                         timeout=3, headers={"User-Agent": self._random_ua()})
+            return r.status_code == 200
+        except Exception:
+            return False
+
     def collect(self) -> Dict[str, int]:
         """采集北向资金流向数据"""
         self._ensure_table()
         results = {"north_flow": 0}
+
+        # 快速探测，不可达直接跳过
+        if not self._probe_api():
+            logger.warning("[北向资金] push2 不可达，跳过（非关键数据）")
+            return results
 
         params = {
             "klt": "101",

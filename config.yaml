@@ -27,27 +27,31 @@ collector:
 
   # 数据源开关
   sources:
-    eastmoney: true       # 东方财富（新闻+行情+资金+龙虎榜）
-    sina: true            # 新浪财经（新闻+行情）
-    xueqiu: true          # 雪球（新闻+情绪）
-    cninfo: true          # 巨潮资讯（公司公告）
+    # ✅ 有效数据源
+    sina: true            # 新浪财经（新闻+行情）— 主力数据源
+    bb_browser: true       # bb-browser 浏览器采集（雪球112只行情+热股+东财新闻）
     cls: true             # 财联社（电报快讯）
-    wallstreet: true      # 华尔街见闻
-    tencent: true         # 腾讯证券
     jin10: true           # 金十数据（快讯）
-    national_stat: true   # 国家统计局（宏观数据）
-    sse: true             # 上交所公告
-    szse: true            # 深交所公告
-    bse: true             # 北交所公告
+    gov_policy: true      # 央行/发改委/工信部政策（工信部OK，其他URL需更新）
     stcn: true            # 证券时报
-    10jqka: true          # 同花顺7x24快讯
-    gov_policy: true      # 央行/发改委/工信部政策
-    history_quotes: true   # 历史K线数据
-    north_flow: true       # 北向资金流向
-    margin_trading: true   # 融资融券数据
-    guba_sentiment: true   # 股吧情绪
-    bond_yield: true       # 国债收益率
-    stock_hot: true        # 股票热度排行
+    # ⚠️ 部分有效
+    eastmoney: false      # 东方财富（推建首页news有时能采到，push2行情/资金已挂，false=跳过，避免重试耗时）
+    xueqiu: false         # 雪球旧爬虫（页面解析不稳定，由 bb-browser 替代）
+    10jqka: false         # 同花顺7x24快讯（API已变，一直0条）
+    # ❌ 已失效，关闭
+    cninfo: false         # 巨潮资讯（API需更新）
+    wallstreet: false     # 华尔街见闻
+    tencent: false        # 腾讯证券
+    national_stat: false  # 国家统计局
+    sse: false            # 上交所公告
+    szse: false           # 深交所公告
+    bse: false            # 北交所公告
+    history_quotes: false # 历史K线（baostock未安装+腾讯API已变）
+    north_flow: false     # 北向资金（push2不可达）
+    margin_trading: false # 融资融券（push2不可达）
+    guba_sentiment: false # 股吧情绪（push2ex已404，由bb-browser行情情绪替代）
+    bond_yield: false     # 国债收益率（和讯/华尔街API已变）
+    stock_hot: false      # 股票热度（push2ex已404，由bb-browser雪球热榜替代）
 
 # 分析模块
 analyzer:

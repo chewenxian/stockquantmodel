@@ -8,6 +8,7 @@ v2.0 优化：
 - 智能分组：行情/新闻类高频采集器优先并行，历史K线等低频采集器单独调度
 """
 import logging
+import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Optional
@@ -33,6 +34,7 @@ from collector.spiders.guba_sentiment import GubaSentimentCollector
 from collector.spiders.bond_yield import BondYieldCollector
 from collector.spiders.stock_hot import StockHotCollector
 from collector.spiders.iwencai_boards import IwencaiBoardCollector
+from collector.spiders.bb_browser import BbBrowserCollector
 from collector.fallback import FallbackChain
 from output.realtime_pusher import RealtimePusher
 
@@ -40,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # 高频采集器（新闻/行情）：每次采集都执行，并行度高
 _HIGH_FREQ = {"东方财富", "新浪财经", "雪球", "同花顺快讯", "证券时报",
-              "政策宏观", "金十数据", "政府政策"}
+              "政策宏观", "金十数据", "政府政策", "bb-browser"}
 
 # 中频采集器（资金/情绪）：可按增量间隔跳过
 _MID_FREQ = {"北向资金", "融资融券", "股吧情绪", "国债收益率", "股票热度", "问财板块"}
@@ -130,6 +132,10 @@ class CollectScheduler:
         # 替代被封锁的 push2 API，提供板块排行+资金流向
         if os.environ.get("IWENCAI_API_KEY"):
             self.collectors["问财板块"] = IwencaiBoardCollector(self.db, proxy)
+
+        # bb-browser 浏览器采集器（需要本地 Chrome + bb-browser 守护进程）
+        if sources.get("bb_browser", True):
+            self.collectors["bb-browser"] = BbBrowserCollector(self.db, proxy)
 
         logger.info(f"采集器初始化完成: {list(self.collectors.keys())} ({len(self.collectors)}个)")
 
