@@ -569,7 +569,31 @@ def cmd_schedule():
             logger.error(f"快速采集推送异常: {e}")
 
     # 快速采集（含推送）
-    sch.every(intervals.get("news", 30)).minutes.do(schedule_quick_with_push)
+    sch.every(intervals.get("news", 15)).minutes.do(schedule_quick_with_push)
+
+    # 全量采集（含bb-browser：公告/行情/板块/资金等）
+    sch.every(10).minutes.do(schedule_collect_with_push)
+
+    # 政策宏观 + 公告 专项采集（bb-browser，高频）
+    def schedule_bb_browser():
+        bb = scheduler.collectors.get("bb-browser")
+        if not bb:
+            return
+        try:
+            logger.info("[定时] bb-browser 开始采集...")
+            # 只采公告+政策相关
+            result = {}
+            result["announcements"] = bb.collect_announcements()
+            result["eastmoney_news"] = bb.collect_eastmoney_news(10)
+            if any(v for v in result.values()):
+                logger.info(f"[定时] bb-browser 采集: {result}")
+            pushed = scheduler.realtime_pusher.process_new_items()
+            if pushed:
+                logger.info(f"[定时] bb-browser 触发 {pushed} 条推送")
+        except Exception as e:
+            logger.error(f"bb-browser 定时采集异常: {e}")
+    # 每5分钟检查一次公告/政策
+    sch.every(5).minutes.do(schedule_bb_browser)
 
     # 新浪财经常规新闻采集（7个板块）
     # 交易日每5分钟，非交易日每60分钟

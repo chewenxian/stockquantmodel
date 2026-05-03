@@ -57,6 +57,24 @@ class RealtimePusher:
         "会计差错": {"level": "A", "urgency": "immediate"},       # 追溯调整
         "业绩修正": {"level": "A", "urgency": "immediate"},       # 业绩预告修正
         "预盈转亏": {"level": "S", "urgency": "immediate"},
+        # 政策宏观事件
+        "降准降息": {"level": "A", "urgency": "immediate"},
+        "央行政策": {"level": "A", "urgency": "immediate"},
+        "产业政策": {"level": "B", "urgency": "immediate"},
+        "监管政策": {"level": "A", "urgency": "immediate"},
+        "行业整顿": {"level": "A", "urgency": "immediate"},
+        "贸易政策": {"level": "B", "urgency": "normal"},
+        "财政政策": {"level": "A", "urgency": "immediate"},
+        # 公告相关事件
+        "业绩预告": {"level": "A", "urgency": "immediate"},
+        "四季报": {"level": "B", "urgency": "normal"},
+        "半年报": {"level": "B", "urgency": "normal"},
+        "年报": {"level": "B", "urgency": "normal"},
+        "股东会": {"level": "C", "urgency": "normal"},
+        "分红": {"level": "B", "urgency": "normal"},
+        "停牌": {"level": "A", "urgency": "immediate"},
+        "复牌": {"level": "A", "urgency": "immediate"},
+        "可转债": {"level": "B", "urgency": "normal"},
     }
 
     PUSH_CHANNELS = ["qq", "feishu"]
@@ -184,6 +202,24 @@ class RealtimePusher:
                 "业绩修正": ["业绩修正", "业绩预告修正", "修正公告",
                              "向下修正", "大幅向下修正"],
                 "预盈转亏": ["预盈转亏", "盈利转亏", "业绩大亏"],
+                # 政策宏观
+                "降准降息": ["降准", "降息", "全面降准", "定向降准", "LPR", "利率下调", "下调利率"],
+                "央行政策": ["央行", "人民银行", "逆回购", "MLF", "SLF", "常备借贷便利", "中期借贷"],
+                "产业政策": ["产业政策", "扶持", "补贴", "专项资金", "发展规划", "实施方案"],
+                "监管政策": ["监管", "新规", "征求意见稿", "管理办法", "通知", "指导意见"],
+                "行业整顿": ["整顿", "整治", "规范", "清理", "处罚", "罚款", "吊销"],
+                "贸易政策": ["关税", "贸易战", "反倾销", "出口管制", "进口", "制裁", "反制"],
+                "财政政策": ["财政", "减税", "降费", "专项债", "国债", "赤字率", "财政支出"],
+                # 公告相关
+                "业绩预告": ["业绩预告", "业绩预告修正", "业绩快报", "一季报"],
+                "四季报": ["四季报"],
+                "半年报": ["半年报", "中期报告", "中报"],
+                "年报": ["年报", "年度报告", "年度股东会"],
+                "股东会": ["股东会", "股东大会", "临时股东"],
+                "分红": ["分红", "派息", "送股", "转增", "每10股", "利润分配"],
+                "停牌": ["停牌", "临时停牌", "暂停交易"],
+                "复牌": ["复牌", "恢复交易"],
+                "可转债": ["可转债", "可转换", "转债申购", "转债上市"],
             }
 
             keywords = keyword_map.get(event_type, [])
@@ -378,16 +414,20 @@ class RealtimePusher:
 
         # 影响判断
         if event_type in ["立案调查", "退市风险", "业绩预亏", "业绩变脸",
-                          "财务造假", "会计差错", "业绩修正", "预盈转亏"]:
+                          "财务造假", "会计差错", "业绩修正", "预盈转亏",
+                          "行业整顿", "监管政策"]:
             lines.append("⚠️ **负面影响，建议关注风险**")
-        elif event_type in ["业绩预增", "中标合同", "股份回购"]:
-            lines.append("✅ 正面影响")
-        elif event_type in ["高管增持"]:
-            lines.append("✅ 正面信号")
+        elif event_type in ["业绩预增", "中标合同", "股份回购", "高管增持",
+                           "降准降息", "央行政策", "产业政策", "财政政策"]:
+            lines.append("✅ 正面/中性影响")
         elif event_type in ["高管减持"]:
             lines.append("⚠️ 关注减持动向")
         elif event_type == "资产重组":
             lines.append("🔍 重大事项，关注后续进展")
+        elif event_type in ["停牌", "复牌"]:
+            lines.append("⏸️ 交易状态变更")
+        elif event_type in ["分红"]:
+            lines.append("💰 分红派息")
 
         lines.append("")
         lines.append(f"⏰ {datetime.now().strftime('%H:%M:%S')}")
