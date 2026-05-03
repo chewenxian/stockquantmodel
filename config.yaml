@@ -32,7 +32,7 @@ collector:
     bb_browser: true       # bb-browser 浏览器采集（雪球112只行情+热股+东财新闻）
     cls: true             # 财联社（电报快讯）
     jin10: true           # 金十数据（快讯）
-    gov_policy: true      # 央行/发改委/工信部政策（工信部OK，其他URL需更新）
+    gov_policy: false     # 政府网站URL已404失效，由财联社+华尔街见闻覆盖
     stcn: true            # 证券时报
     # ⚠️ 部分有效
     eastmoney: false      # 东方财富（推建首页news有时能采到，push2行情/资金已挂，false=跳过，避免重试耗时）
