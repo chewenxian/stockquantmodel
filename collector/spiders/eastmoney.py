@@ -572,7 +572,7 @@ class EastMoneyCollector(BaseCollector):
             for news in unlinked:
                 title = news["title"] or ""
                 for s in stocks_sorted:
-                    if s["name"] in title:
+                    if self._stock_name_in_title(s["name"], title):
                         links.append((news["id"], s["code"], 0.0))
                         break
 

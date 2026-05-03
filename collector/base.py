@@ -272,3 +272,24 @@ class BaseCollector:
         if hasattr(self, 'db') and self.db:
             return self.db.get_last_fetch(self._tracker_key)
         return None
+
+    # ───────────────────────────────────
+    # 股票名称标题匹配（所有采集器共享）
+    # ───────────────────────────────────
+
+    @staticmethod
+    def _stock_name_in_title(name: str, title: str) -> bool:
+        """判断股票名是否在标题中作为独立词组出现（避免"金融时报"误配"金融"）"""
+        if not name or not title or name not in title:
+            return False
+        idx = title.index(name)
+        before = title[idx-1] if idx > 0 else ""
+        after = title[idx+len(name)] if idx+len(name) < len(title) else ""
+        def _is_cjk_or_alpha(ch):
+            cp = ord(ch)
+            return (0x4E00 <= cp <= 0x9FFF) or ('a' <= ch <= 'z') or ('A' <= ch <= 'Z')
+        if before and _is_cjk_or_alpha(before):
+            return False
+        if after and _is_cjk_or_alpha(after):
+            return False
+        return True
