@@ -7,16 +7,20 @@ bb-browser 数据源：通过真实浏览器绕过反爬获取证券数据
 - 无需维护 Cookie / API 签名 / 反爬策略
 - 结构化 JSON 输出，直接入库
 
+采集引擎：
+  - bb-browser CLI（雪球site适配器）
+  - Scrapling AsyncFetcher（东财push2 API，自动降级到bb-browser）
+
 当前采集能力：
   ✅ xueqiu/stock          - 雪球个股实时行情（112只）
   ✅ xueqiu/hot-stock      - 雪球热门股票榜
   ✅ eastmoney/news        - 东方财富财经新闻
-  ✅ browser fetch(push2)  - 板块涨跌幅排行（行业+概念，共60条）
-  ✅ browser fetch(push2)  - 个股资金流向排行（主力净流入前30）
-  ✅ browser fetch(push2)  - 基本面数据（PE-TTM、PB、总市值，112只）
-  ✅ browser fetch(push2)  - 融资融券数据（10条）
-  ✅ browser fetch(push2)  - 北向资金流向（沪深港通）
-  ✅ browser fetch(东财)  - 公司公告
+  ✅ Scrapling(push2)      - 板块涨跌幅排行（行业+概念，共60条）
+  ✅ Scrapling(push2)      - 个股资金流向排行（主力净流入前30）
+  ✅ Scrapling(push2)      - 基本面数据（PE-TTM、PB、总市值，112只→1次批量）
+  ✅ Scrapling(push2)      - 融资融券数据（10条）
+  ✅ Scrapling(push2)      - 北向资金流向（沪深港通）
+  ✅ Scrapling(东财)      - 公司公告
 """
 import subprocess
 import json
@@ -334,8 +338,49 @@ class BbBrowserCollector(BaseCollector):
 
     def _browser_fetch(self, url: str) -> Optional[dict]:
         """
-        通过 bb-browser 在浏览器上下文中发起 fetch 请求
-        可绕过 push2.eastmoney.com 的 RemoteDisconnected 问题
+        通过 Scrapling AsyncFetcher 发起请求
+        比 bb-browser subprocess 方式更快，且不需要 Chrome 实例
+        自动降级到 bb-browser
+        """
+        import subprocess as _sp
+        import os as _os
+
+        # 项目根目录（从 bb_browser.py 向上3层）
+        _project_root = _os.path.dirname(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        )
+        # Scrapling venv 中的 Python 解释器
+        fetch_script = _os.path.join(_project_root, "utils", "scrapling_fetch.py")
+        scrapling_python = _os.path.join(
+            _project_root, ".scrapling_venv", "bin", "python3"
+        )
+
+        try:
+            result = _sp.run(
+                [scrapling_python, fetch_script, url],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode != 0:
+                logger.warning(f"[Scrapling] 请求失败: {result.stderr[:100]}")
+                # 降级到 bb-browser
+                return self._legacy_browser_fetch(url)
+
+            data = json.loads(result.stdout.strip())
+            if not data.get("success"):
+                logger.warning(f"[Scrapling] 失败: {data.get('error','')}")
+                return self._legacy_browser_fetch(url)
+            return data.get("data")
+        except FileNotFoundError:
+            # Scrapling 未安装，降级到 bb-browser
+            logger.warning("[Scrapling] 未安装，降级到 bb-browser")
+            return self._legacy_browser_fetch(url)
+        except Exception as e:
+            logger.warning(f"[Scrapling] 异常: {e}")
+            return self._legacy_browser_fetch(url)
+
+    def _legacy_browser_fetch(self, url: str) -> Optional[dict]:
+        """
+        降级方案：通过 bb-browser subprocess 获取数据
         """
         try:
             result = subprocess.run(
@@ -509,53 +554,54 @@ class BbBrowserCollector(BaseCollector):
     def _batch_fundamentals(self, stocks: list) -> list:
         """
         批量获取基本面数据（PE, PB, 市值等）
-        通过浏览器fetch调用东财单股API
+        使用 Scrapling 通过 ulist.np/get 批量API一次性获取，
+        替代原来的每只股票逐个fetch（112次→1次）
         """
-        import subprocess as _sp
-        import json as _json
+        if not stocks:
+            return []
+
+        # 批量构建 secids（ulist.np/get 支持一次最多50只）
+        secids = []
+        for s in stocks:
+            prefix = "1." if s["market"] == "SH" else "0."
+            secids.append(f"{prefix}{s['code']}")
 
         results = []
-        for stock in stocks:
-            code = stock["code"]
-            market = stock["market"]
-            prefix = "1." if market == "SH" else "0."
-            secid = f"{prefix}{code}"
-
+        # 每批50只
+        batch_size = 50
+        for i in range(0, len(secids), batch_size):
+            batch = ",".join(secids[i:i+batch_size])
             url = (
-                "https://push2.eastmoney.com/api/qt/stock/get"
-                f"?secid={secid}"
-                "&fields=f43,f57,f58,f116,f117,f162,f167"
+                "https://push2.eastmoney.com/api/qt/ulist.np/get"
+                f"?fltt=2&fields=f2,f3,f12,f14,f55,f86,f116,f117,f162,f167"
+                f"&secids={batch}&invt=2"
             )
 
-            try:
-                r = _sp.run(
-                    [self._bb_bin, "fetch", url, "--json"],
-                    capture_output=True, text=True, timeout=8,
-                )
-                if r.returncode != 0:
-                    continue
-                data = _json.loads(r.stdout.strip())
-                d = data.get("data", {})
-                if not d:
-                    continue
-
-                # 东财单股API字段:
-                # f43=price(×100), f162=pe_ttm(×100), f167=pb(×100)
-                # f116=总市值, f117=流通市值
-                price_raw = d.get("f43", 0) or 0
-                pe_raw = d.get("f162", 0) or 0
-                pb_raw = d.get("f167", 0) or 0
-
-                results.append({
-                    "code": code,
-                    "price": float(price_raw) / 100.0,
-                    "pe_ttm": float(pe_raw) / 100.0 if pe_raw and pe_raw != "-" else None,
-                    "pb": float(pb_raw) / 100.0 if pb_raw and pb_raw != "-" else None,
-                    "total_mv": float(d.get("f116", 0) or 0),
-                    "float_mv": float(d.get("f117", 0) or 0),
-                })
-            except Exception:
+            data = self._browser_fetch(url)
+            if not data or not data.get("data"):
+                logger.warning(f"[Scrapling] 基本面批次获取失败 (idx={i})")
                 continue
+
+            items = data["data"].get("diff", [])
+            for item in items:
+                code = str(item.get("f12", ""))
+                if not code:
+                    continue
+
+                try:
+                    pe_raw = item.get("f86", 0) or 0  # f86 = PE静态
+                    pb_raw = item.get("f167", 0) or 0
+
+                    results.append({
+                        "code": code,
+                        "price": float(item.get("f2", 0) or 0),
+                        "pe_ttm": float(pe_raw) / 100.0 if pe_raw and pe_raw != "-" else None,
+                        "pb": float(pb_raw) / 100.0 if pb_raw and pb_raw != "-" else None,
+                        "total_mv": float(item.get("f116", 0) or 0),
+                        "float_mv": float(item.get("f117", 0) or 0),
+                    })
+                except Exception:
+                    continue
 
         return results
 
