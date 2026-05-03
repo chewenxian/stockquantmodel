@@ -689,19 +689,66 @@ def cmd_schedule():
             logger.error(f"新浪财经节假日采集异常: {e}")
     sch.every(sina_interval_holiday).minutes.do(schedule_sina_holiday)
 
-    # 收盘后的全量采集+推送（交易日 15:30）
-    sch.every().monday.at("15:30").do(schedule_collect_with_push)
-    sch.every().tuesday.at("15:30").do(schedule_collect_with_push)
-    sch.every().wednesday.at("15:30").do(schedule_collect_with_push)
-    sch.every().thursday.at("15:30").do(schedule_collect_with_push)
-    sch.every().friday.at("15:30").do(schedule_collect_with_push)
+    # ──────────────────────────────────────────
+    # 报告推送（交易日）
+    # ──────────────────────────────────────────
 
-    # 开盘前初始化
-    sch.every().monday.at("09:00").do(cmd_init)
-    sch.every().tuesday.at("09:00").do(cmd_init)
-    sch.every().wednesday.at("09:00").do(cmd_init)
-    sch.every().thursday.at("09:00").do(cmd_init)
-    sch.every().friday.at("09:00").do(cmd_init)
+    def generate_and_push_report(report_type: str):
+        """生成并推送报告，非交易日跳过"""
+        now = datetime.now()
+        if now.weekday() >= 5:
+            return
+        try:
+            from analyzer.report_generator import ReportGenerator
+            from output.notifier import Notifier
+            gen = ReportGenerator()
+            notifier = Notifier()
+            channels = ["wechat", "feishu"]
+
+            if report_type == "morning":
+                logger.info("[报告] 生成盘前早报...")
+                report = gen.generate_morning_report()
+                label = "🌅 盘前早报"
+            elif report_type == "midday":
+                logger.info("[报告] 生成午间速报...")
+                report = gen.generate_midday_report()
+                label = "☀️ 午间速报"
+            elif report_type == "closing":
+                logger.info("[报告] 生成收盘复盘...")
+                scheduler.collect_with_push(use_fallback=True)
+                report = gen.generate_closing_with_outlook()
+                label = "📊 收盘复盘"
+            else:
+                return
+
+            if report:
+                notifier.push_report(report, channels=channels)
+                logger.info(f"[报告] {label} 已推送到 {', '.join(channels)}")
+            else:
+                logger.warning(f"[报告] {label} 生成失败，可能为非交易日")
+        except Exception as e:
+            logger.error(f"[报告] 推送异常: {e}")
+
+    # 盘前早报 09:00
+    sch.every().monday.at("09:00").do(lambda: generate_and_push_report("morning"))
+    sch.every().tuesday.at("09:00").do(lambda: generate_and_push_report("morning"))
+    sch.every().wednesday.at("09:00").do(lambda: generate_and_push_report("morning"))
+    sch.every().thursday.at("09:00").do(lambda: generate_and_push_report("morning"))
+    sch.every().friday.at("09:00").do(lambda: generate_and_push_report("morning"))
+
+    # 午间速报 12:00
+    sch.every().monday.at("12:00").do(lambda: generate_and_push_report("midday"))
+    sch.every().tuesday.at("12:00").do(lambda: generate_and_push_report("midday"))
+    sch.every().wednesday.at("12:00").do(lambda: generate_and_push_report("midday"))
+    sch.every().thursday.at("12:00").do(lambda: generate_and_push_report("midday"))
+    sch.every().friday.at("12:00").do(lambda: generate_and_push_report("midday"))
+
+    # 收盘复盘 15:30
+    sch.every().monday.at("15:30").do(lambda: generate_and_push_report("closing"))
+    sch.every().tuesday.at("15:30").do(lambda: generate_and_push_report("closing"))
+    sch.every().wednesday.at("15:30").do(lambda: generate_and_push_report("closing"))
+    sch.every().thursday.at("15:30").do(lambda: generate_and_push_report("closing"))
+    sch.every().friday.at("15:30").do(lambda: generate_and_push_report("closing"))
 
     print("✅ 定时任务已注册，按 Ctrl+C 退出")
 
