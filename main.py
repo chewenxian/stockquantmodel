@@ -552,14 +552,23 @@ def cmd_schedule():
     print("🚨 每次采集后自动检查重大事件并秒推至 QQ + 飞书")
     print()
 
+    def is_trading_day():
+        """判断是否为交易日（周一至周五）"""
+        return datetime.now().weekday() < 5
+
     # 使用带有实时推送的采集
     def schedule_collect_with_push():
+        if not is_trading_day():
+            # 节假日跳过全量采集（由节假日任务负责）
+            return
         try:
             scheduler.collect_with_push(use_fallback=True)
         except Exception as e:
             logger.error(f"定时采集推送异常: {e}")
 
     def schedule_quick_with_push():
+        if not is_trading_day():
+            return
         try:
             scheduler.quick_collect()
             pushed = scheduler.realtime_pusher.process_new_items()
@@ -568,20 +577,43 @@ def cmd_schedule():
         except Exception as e:
             logger.error(f"快速采集推送异常: {e}")
 
-    # 快速采集（含推送）
+    # 交易日：快速采集每15分钟，全量每10分钟
     sch.every(intervals.get("news", 15)).minutes.do(schedule_quick_with_push)
-
-    # 全量采集（含bb-browser：公告/行情/板块/资金等）
     sch.every(10).minutes.do(schedule_collect_with_push)
+
+    # 节假日降频版本
+    def schedule_quick_holiday():
+        if is_trading_day():
+            return
+        try:
+            scheduler.quick_collect()
+        except Exception as e:
+            logger.error(f"节假日快速采集异常: {e}")
+
+    def schedule_full_holiday():
+        if is_trading_day():
+            return
+        try:
+            scheduler.collect_all()
+        except Exception as e:
+            logger.error(f"节假日全量采集异常: {e}")
+
+    # 节假日：快速60分钟一次，全量120分钟一次
+    sch.every(60).minutes.do(schedule_quick_holiday)
+    sch.every(120).minutes.do(schedule_full_holiday)
 
     # 政策宏观 + 公告 专项采集（bb-browser，高频）
     def schedule_bb_browser():
         bb = scheduler.collectors.get("bb-browser")
         if not bb:
             return
+        now = datetime.now()
+        # 节假日降频：周末每60分钟检查一次
+        if now.weekday() >= 5:
+            logger.info("[定时] bb-browser 节假日跳过（由节假日任务负责）")
+            return
         try:
             logger.info("[定时] bb-browser 开始采集...")
-            # 只采公告+政策相关
             result = {}
             result["announcements"] = bb.collect_announcements()
             result["eastmoney_news"] = bb.collect_eastmoney_news(10)
@@ -592,8 +624,26 @@ def cmd_schedule():
                 logger.info(f"[定时] bb-browser 触发 {pushed} 条推送")
         except Exception as e:
             logger.error(f"bb-browser 定时采集异常: {e}")
-    # 每5分钟检查一次公告/政策
+    # 交易日每5分钟检查一次公告/政策
     sch.every(5).minutes.do(schedule_bb_browser)
+
+    # 节假日：bb-browser 降频到60分钟
+    def schedule_bb_browser_holiday():
+        bb = scheduler.collectors.get("bb-browser")
+        if not bb:
+            return
+        now = datetime.now()
+        if now.weekday() < 5:
+            return
+        try:
+            logger.info("[定时-节假日] bb-browser 采集...")
+            result = {}
+            result["announcements"] = bb.collect_announcements()
+            result["eastmoney_news"] = bb.collect_eastmoney_news(10)
+            logger.info(f"[定时-节假日] bb-browser 采集: {result}")
+        except Exception as e:
+            logger.error(f"bb-browser 节假日采集异常: {e}")
+    sch.every(60).minutes.do(schedule_bb_browser_holiday)
 
     # 新浪财经常规新闻采集（7个板块）
     # 交易日每5分钟，非交易日每60分钟
